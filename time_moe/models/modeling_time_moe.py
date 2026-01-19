@@ -411,7 +411,10 @@ class TimeMoeAttention(nn.Module):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            if hasattr(past_key_value, "get_usable_length"):
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            else:
+                kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
         cos, sin = self.rotary_emb(value_states, seq_len=kv_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
 
@@ -506,7 +509,10 @@ class TimeMoeFlashAttention2(TimeMoeAttention):
                     "for auto-regressive decoding with k/v caching, please make sure to initialize the attention class "
                     "with a layer index."
                 )
-            kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            if hasattr(past_key_value, "get_usable_length"):
+                kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
+            else:
+                kv_seq_len += past_key_value.get_seq_length(self.layer_idx)
         rotary_seq_len = max(kv_seq_len, position_ids[:, -1].max().item()) + 1
         cos, sin = self.rotary_emb(value_states, seq_len=rotary_seq_len)
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin, position_ids)
@@ -822,7 +828,12 @@ class TimeMoeModel(TimeMoePreTrainedModel):
             use_legacy_cache = not isinstance(past_key_values, Cache)
             if use_legacy_cache:
                 past_key_values = DynamicCache.from_legacy_cache(past_key_values)
-            past_key_values_length = past_key_values.get_usable_length(seq_length)
+            
+            # Compatibility fix for newer transformers versions
+            if hasattr(past_key_values, "get_usable_length"):
+                past_key_values_length = past_key_values.get_usable_length(seq_length)
+            else:
+                past_key_values_length = past_key_values.get_seq_length()
 
         if position_ids is None:
             device = input_ids.device if input_ids is not None else inputs_embeds.device
@@ -960,7 +971,7 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
             self.horizon_length_map[horizon_length] = i
         self.lm_heads = nn.ModuleList(lm_head_list)
 
-        self.loss_function = torch.nn.HuberLoss(reduction='none', delta=2.0)
+        self.time_moe_loss_function = torch.nn.HuberLoss(reduction='none', delta=2.0)
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1014,13 +1025,14 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
         if labels is not None:
             # AutoRegressive loss
             ar_loss = 0.0
-            for lm_head, horizon_length in zip(self.lm_heads, self.config.horizon_lengths):
+            head_weights = getattr(self.config, 'head_weights', [1.0] * len(self.lm_heads))
+            for i, (lm_head, horizon_length) in enumerate(zip(self.lm_heads, self.config.horizon_lengths)):
                 one_predictions = lm_head(hidden_states)
                 one_loss = self.calc_ar_loss(one_predictions, labels, loss_masks, horizon_length)
-                ar_loss += one_loss
+                ar_loss += head_weights[i] * one_loss
                 if predictions is None:
                     predictions = one_predictions
-            loss = ar_loss / len(self.config.horizon_lengths)
+            loss = ar_loss / sum(head_weights)
 
             if self.apply_aux_loss:
                 router_logits = outputs.router_logits if return_dict else outputs[-1]
@@ -1095,7 +1107,7 @@ class TimeMoeForPrediction(TimeMoePreTrainedModel, TSGenerationMixin):
             shift_labels = labels
 
         # Calculate loss with mask
-        losses = self.loss_function(shift_predictions, shift_labels)
+        losses = self.time_moe_loss_function(shift_predictions, shift_labels)
 
         if loss_masks is not None:
             losses = losses * loss_masks

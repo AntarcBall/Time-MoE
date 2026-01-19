@@ -200,11 +200,11 @@ class TimeMoeRunner:
 
         return trainer.model
 
-    def get_train_dataset(self, data_path, max_length, stride, normalization_method):
+    def get_train_dataset(self, data_path, max_length, stride, normalization_method, random_offset=False):
         log_in_local_rank_0('Loading dataset...')
         dataset = TimeMoEDataset(data_path, normalization_method=normalization_method)
         log_in_local_rank_0('Processing dataset to fixed-size sub-sequences...')
-        window_dataset = TimeMoEWindowDataset(dataset, context_length=max_length, prediction_length=0, stride=stride, shuffle=False)
+        window_dataset = TimeMoEWindowDataset(dataset, context_length=max_length, prediction_length=0, stride=stride, shuffle=False, random_offset=random_offset)
         return window_dataset
 
 

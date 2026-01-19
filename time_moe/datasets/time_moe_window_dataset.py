@@ -37,13 +37,14 @@ class TimeMoEWindowDataset:
         >>>     print(sample['input_ids'], sample['labels'], sample['loss_masks'])
     """
 
-    def __init__(self, dataset: TimeSeriesDataset, context_length: int, prediction_length: int = 0, stride: int = None, **kwrags):
+    def __init__(self, dataset: TimeSeriesDataset, context_length: int, prediction_length: int = 0, stride: int = None, random_offset: bool = False, **kwrags):
         self.dataset = dataset
         self.context_length = context_length
         self.prediction_length = prediction_length
         self.window_size = context_length + prediction_length
         self.window_size_plus_one = self.window_size + 1
         self.stride = stride if stride else self.window_size
+        self.random_offset = random_offset
 
         num_seqs = len(self.dataset)
         iterator = range(num_seqs)
@@ -58,13 +59,19 @@ class TimeMoEWindowDataset:
             # Skip sequences with fewer than 2 points
             if n_points < 2:
                 continue
-            self.sub_seq_indexes.append((seq_idx, 0))
+            
+            start_offset = 0
+            if self.random_offset and n_points > self.window_size_plus_one:
+                start_offset = random.randint(0, min(self.stride - 1, n_points - self.window_size_plus_one))
+
+            self.sub_seq_indexes.append((seq_idx, start_offset))
             for offset_idx in range(
-                self.stride,
+                start_offset + self.stride,
                 n_points - self.window_size_plus_one + 1,
                 self.stride
             ):
                 self.sub_seq_indexes.append((seq_idx, offset_idx))
+
 
     def __len__(self): 
         return len(self.sub_seq_indexes)

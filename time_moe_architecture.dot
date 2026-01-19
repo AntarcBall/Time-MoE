@@ -1,0 +1,99 @@
+digraph TimeMoEArchitecture {
+    // Graph properties
+    rankdir=TB;
+    label="Time-MoE Model Architecture";
+    labelloc=top;
+    fontsize=16;
+    fontname="Arial Bold";
+    
+    // Node properties
+    node [shape=box, style=filled, fillcolor=lightblue, fontname="Arial"];
+    
+    // Input layer
+    input_layer [label="Input Embedding\n(MLP-based)", fillcolor=lightgreen];
+    
+    // Main model structure
+    subgraph cluster_model {
+        label="Time-MoE Model";
+        color=gray;
+        style=dashed;
+        
+        // Decoder layers
+        subgraph cluster_layers {
+            label="Transformer Decoder Layers (N layers)";
+            color=lightgray;
+            
+            layer_1 [label="Decoder Layer 1", fillcolor=lightyellow];
+            layer_2 [label="Decoder Layer 2", fillcolor=lightyellow];
+            layer_n [label="...", fillcolor=white, shape=plaintext];
+            layer_last [label="Decoder Layer N", fillcolor=lightyellow];
+        }
+        
+        // Connections within a layer
+        subgraph cluster_inner_layer {
+            label="Decoder Layer Structure";
+            color=lightcoral;
+            style=dotted;
+            
+            layer_norm_1 [label="RMSNorm", fillcolor=lightcyan, shape=ellipse];
+            attention [label="Multi-Head\nAttention", fillcolor=orange];
+            layer_norm_2 [label="RMSNorm", fillcolor=lightcyan, shape=ellipse];
+            
+            // MoE FFN component
+            subgraph cluster_ffn {
+                label="Mixture of Experts (MoE)\nor Dense FFN";
+                color=plum;
+                
+                gate [label="Router/Gating\nNetwork", fillcolor=pink];
+                expert_1 [label="Expert 1", fillcolor=gold];
+                expert_2 [label="Expert 2", fillcolor=gold];
+                expert_k [label="Expert K", fillcolor=gold];
+                shared_expert [label="Shared Expert", fillcolor=khaki];
+                combine [label="Combine\nOutputs", fillcolor=plum];
+            }
+        }
+    }
+    
+    // Output layer
+    output_norm [label="Final RMSNorm", fillcolor=lightcyan, shape=ellipse];
+    output_layer [label="Output Layer\n(Prediction Head)", fillcolor=lightgreen];
+    
+    // Connections
+    input_layer -> layer_1;
+    layer_1 -> layer_2;
+    layer_2 -> layer_n;
+    layer_n -> layer_last;
+    
+    // Within-layer connections
+    layer_norm_1 -> attention;
+    attention -> layer_norm_2;
+    layer_norm_2 -> gate;
+    gate -> expert_1;
+    gate -> expert_2;
+    gate -> expert_k;
+    gate -> shared_expert;
+    expert_1 -> combine;
+    expert_2 -> combine;
+    expert_k -> combine;
+    shared_expert -> combine;
+    combine -> output_norm;
+    
+    // Final connections
+    layer_last -> output_norm;
+    output_norm -> output_layer;
+    
+    // Legend
+    subgraph cluster_legend {
+        label="Legend";
+        color=black;
+        style=solid;
+        
+        legend_input [label="Input Processing", fillcolor=lightgreen, shape=box];
+        legend_norm [label="Normalization", fillcolor=lightcyan, shape=ellipse];
+        legend_attention [label="Attention", fillcolor=orange, shape=box];
+        legend_expert [label="Expert Network", fillcolor=gold, shape=box];
+        legend_router [label="Routing", fillcolor=pink, shape=box];
+        legend_shared [label="Shared Expert", fillcolor=khaki, shape=box];
+        legend_output [label="Output", fillcolor=lightgreen, shape=box];
+    }
+}
