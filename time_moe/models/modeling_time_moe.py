@@ -227,7 +227,7 @@ class TimeMoeRotaryEmbedding(torch.nn.Module):
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->TimeMOE
 class TimeMoeRMSNorm(torch.nn.Module):
-    def __init__(self, hidden_size, eps=1e-6):
+    def __init__(self, hidden_size, eps=1e-5): # Increased eps
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_size))
         self.variance_epsilon = eps
@@ -296,8 +296,10 @@ class TimeMoeSparseExpertsLayer(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_dim)
         # router_logits -> (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
+        
+        # Numerical stability: subtract max before softmax
+        routing_weights = F.softmax(router_logits - torch.max(router_logits, dim=-1, keepdim=True)[0], dim=1, dtype=torch.float)
 
-        routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
         routing_weights, selected_experts = torch.topk(routing_weights, self.top_k, dim=-1)
         if self.norm_topk_prob:
             routing_weights /= routing_weights.sum(dim=-1, keepdim=True)
