@@ -28,13 +28,37 @@ Time-MoE (Time Series Mixture of Experts) is a specialized transformer architect
 - Projects hidden representations to target dimensions
 - Supports multi-horizon forecasting
 
+## Dual Scoring System
+
+Time-MoE incorporates an innovative dual scoring system that enhances prediction accuracy by combining:
+
+### 1. Error-Based Scoring
+- Calculates prediction error using Huber loss
+- Measures discrepancy between predicted and actual values
+- Provides direct feedback on prediction accuracy
+
+### 2. Latent Space Distance Scoring
+- Analyzes similarity in the latent space representation
+- Uses cosine similarity or Euclidean distance
+- Captures underlying temporal patterns and relationships
+
+### 3. Combined Scoring Formula
+```
+Total_Score = α × Error_Score + β × Latent_Distance_Score
+```
+- α and β are hyperparameters controlling the importance of each component
+- Enables robust and accurate forecasting by leveraging both approaches
+
 ## Architecture Variants Created
 
-Three visualizations were created to represent the Time-MoE architecture:
+Six visualizations were created to represent the Time-MoE architecture:
 
-1. **Basic Architecture** (`time_moe_architecture.png`): High-level overview of the model components
+1. **Basic Architecture** (`time_moe_architecture.png`): High-level overview of the original model components
 2. **Detailed Architecture** (`detailed_time_moe_architecture.png`): In-depth view of internal mechanisms
 3. **Simplified Architecture** (`simple_time_moe_architecture.png`): Conceptual view focusing on core ideas
+4. **Dual Scoring Architecture** (`dual_scoring_architecture.png`): Visualization of the dual scoring system
+5. **Detailed Dual Scoring** (`detailed_dual_scoring.png`): In-depth view of dual scoring integration
+6. **Enhanced Architecture** (`enhanced_time_moe_dual_scoring.png`): Original architecture enhanced with dual scoring
 
 ## Key Innovations
 
@@ -42,6 +66,7 @@ Three visualizations were created to represent the Time-MoE architecture:
 - **Efficient Computation**: Only activates relevant experts per token
 - **Multi-Horizon Forecasting**: Simultaneous prediction for multiple time horizons
 - **Load Balancing**: Ensures optimal expert utilization through auxiliary loss
+- **Dual Scoring System**: Combines error and latent space analysis for improved accuracy
 
 ## Configuration Parameters
 

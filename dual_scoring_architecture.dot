@@ -1,0 +1,72 @@
+digraph DualScoringSystem {
+    // Graph properties
+    rankdir=TB;
+    label="Time-MoE Dual Scoring System Architecture";
+    labelloc=top;
+    fontsize=16;
+    fontname="Arial Bold";
+    
+    // Node properties
+    node [style=filled, fontname="Arial", fontsize=12];
+    
+    // Input
+    input [label="Time Series Input", fillcolor=lightblue, shape=box];
+    
+    // Encoder
+    encoder [label="Time-MoE Encoder", fillcolor=lightgreen, shape=box];
+    
+    // Two parallel scoring branches
+    latent_processor [label="Latent Space Processor", fillcolor=lightyellow, shape=box];
+    error_processor [label="Error Calculator", fillcolor=lightcoral, shape=box];
+    
+    // Latent space branch details
+    subgraph cluster_latent_branch {
+        label="Latent Space Analysis";
+        color=orange;
+        style=dashed;
+        
+        similarity_calc [label="Similarity Calculation\n(Cosine/Euclidean)", fillcolor=khaki];
+        pattern_match [label="Pattern Matching", fillcolor=lemonchiffon];
+        latent_score [label="Latent Space Score", fillcolor=lightgoldenrod];
+    }
+    
+    // Error branch details
+    subgraph cluster_error_branch {
+        label="Error Analysis";
+        color=red;
+        style=dashed;
+        
+        pred_module [label="Prediction Module", fillcolor=palevioletred];
+        error_calc [label="Error Calculation\n(Huber Loss)", fillcolor=indianred];
+        error_score [label="Error Score", fillcolor=lightpink];
+    }
+    
+    // Scoring combination
+    score_combiner [label="Score Combiner\nα × Error_Score + β × Latent_Score", fillcolor=orchid, shape=ellipse];
+    
+    // Final output
+    final_pred [label="Final Prediction", fillcolor=lightblue, shape=box];
+    
+    // Connections
+    input -> encoder;
+    encoder -> latent_processor;
+    encoder -> error_processor;
+    
+    // Latent branch connections
+    latent_processor -> similarity_calc;
+    similarity_calc -> pattern_match;
+    pattern_match -> latent_score;
+    
+    // Error branch connections
+    error_processor -> pred_module;
+    pred_module -> error_calc;
+    error_calc -> error_score;
+    
+    // Combine scores
+    latent_score -> score_combiner;
+    error_score -> score_combiner;
+    score_combiner -> final_pred;
+    
+    // Hyperparameters
+    hyperparams [label="Hyperparameters\nα (error weight)\nβ (latent weight)", fillcolor=lightgray, shape=box, pos="4,1!", fixedsize=true, width=2, height=0.8];
+}
