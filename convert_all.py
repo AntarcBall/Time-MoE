@@ -3,10 +3,10 @@ import glob
 import numpy as np
 import math
 import json
+import random
 import shutil
 
-# Reuse logic from Time-MoE/scripts/convert_dataset_to_bin.py
-# But simplified for our NPY files
+# Re-engineered Data Pipeline: Strict Isolation for Single-Class AD
 
 def save_array_to_bin(arr, fn):
     with open(fn, mode='wb') as file:
@@ -16,26 +16,21 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
     try:
         max_chunk_size = (1 << 30) * 1  # 1GB chunks
         
-        # Shuffle files to ensure mixed classes in binary chunks (critical for partial evaluation)
-        import random
-        random.seed(42)
-        random.shuffle(npy_files)
-        
         sequence = []
         meta = {}
         meta['dtype'] = dtype
         meta['files'] = {}
-        meta['scales'] = [] # We'll store file info here
+        meta['scales'] = [] 
         
         idx = 0
         file_name_format = 'data-{}-of-{}.bin'
         
-        print(f"Concatenating {len(npy_files)} files...")
+        print(f"Processing {len(npy_files)} files into {out_folder}...")
         
         for f in npy_files:
             seq = np.load(f).astype(np.float32)
             
-            # Simple metadata
+            # Metadata tracking for random access
             meta['scales'].append({
                 'offset': idx,
                 'length': len(seq),
@@ -46,13 +41,13 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
             sequence.append(seq)
             
         if not sequence:
+            print(f"Warning: No data for {out_folder}")
             return 0
             
         sequence = np.concatenate(sequence, axis=0)
-        # Fix: num_sequences should be the count of individual time series, not total points
         meta['num_sequences'] = len(npy_files)
         
-        # Save sequence
+        # Save sequence in chunks
         memory_size = sequence.nbytes
         num_chunks = math.ceil(memory_size / max_chunk_size)
         if num_chunks == 0: num_chunks = 1
@@ -76,18 +71,67 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
         return len(sequence)
         
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"Error processing {out_folder}: {e}")
         return 0
 
-def convert_folder(src_dir, dest_dir):
-    print(f"Converting {src_dir} to {dest_dir}")
-    files = sorted(glob.glob(os.path.join(src_dir, '*.npy')))
-    if not files:
-        print(f"No files in {src_dir}")
-        return
-        
-    process_to_bin(files, dest_dir)
+def strict_isolation_split():
+    # 1. Gather ALL npy files from both directories
+    # We ignore the current folder structure and classify by FILENAME ONLY.
+    src_dirs = ['dataset_npy/train', 'dataset_npy/test']
+    all_files = []
+    for d in src_dirs:
+        files = glob.glob(os.path.join(d, '*.npy'))
+        all_files.extend(files)
+    
+    print(f"Total files found: {len(all_files)}")
+    
+    # 2. Strict Separation
+    # Normal: Starts with '0_'
+    # Anomaly: Starts with '1_' to '6_' (or just not '0_')
+    
+    normals = []
+    anomalies = []
+    
+    for f in all_files:
+        fname = os.path.basename(f)
+        if fname.startswith('0_'):
+            normals.append(f)
+        else:
+            anomalies.append(f)
+            
+    print(f"  - Normal Pool (Group 0): {len(normals)}")
+    print(f"  - Anomaly Pool (Group 1-6): {len(anomalies)}")
+    
+    # 3. Construct Sets
+    # Shuffle Normals first to ensure random distribution
+    random.seed(42)
+    random.shuffle(normals)
+    
+    # Train Set: 90% of Normals ONLY
+    # Purity = 100%
+    split_idx = int(len(normals) * 0.90)
+    train_set = normals[:split_idx]
+    
+    # Validation/Test Set: Remaining 10% Normals + 100% Anomalies
+    # This creates a realistic evaluation scenario
+    test_set = normals[split_idx:] + anomalies
+    
+    # CRITICAL: Shuffle Test Set
+    # This prevents "all normals then all anomalies" which breaks partial evaluation
+    random.shuffle(test_set)
+    
+    print(f"  -> Final Train Set: {len(train_set)} files (Pure Normal)")
+    print(f"  -> Final Test Set : {len(test_set)} files (Mixed: {len(normals)-split_idx} Normal + {len(anomalies)} Anomaly)")
+    
+    # 4. Execute Conversion
+    # Clear existing bins to prevent contamination from old chunks
+    if os.path.exists('dataset_bin'):
+        shutil.rmtree('dataset_bin')
+    
+    process_to_bin(train_set, 'dataset_bin/train')
+    process_to_bin(test_set, 'dataset_bin/test')
+    
+    print("Strict Isolation Split Completed Successfully.")
 
 if __name__ == "__main__":
-    convert_folder('dataset_npy/train', 'dataset_bin/train')
-    convert_folder('dataset_npy/test', 'dataset_bin/test')
+    strict_isolation_split()

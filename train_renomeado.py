@@ -18,7 +18,6 @@ from time_moe.datasets.time_moe_dataset import binary_search
 
 # Global Helpers
 def search_best_f1(scores, labels):
-    # Filter NaNs
     valid_mask = ~np.isnan(scores)
     if not np.any(valid_mask):
         return 0.0, 0.5
@@ -26,10 +25,9 @@ def search_best_f1(scores, labels):
     labels = labels[valid_mask]
     
     precision, recall, thresholds = precision_recall_curve(labels, scores)
-    
-    # FP=2x penalty -> beta=0.5
     beta = 0.5
-    f_beta_scores = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-10)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        f_beta_scores = (1 + beta**2) * precision * recall / (beta**2 * precision + recall + 1e-10)
     
     best_idx = np.argmax(f_beta_scores)
     return f_beta_scores[best_idx], thresholds[best_idx] if best_idx < len(thresholds) else 0.5
@@ -44,7 +42,7 @@ def compute_normal_stats(model, dataloader, num_batches=20):
         for i, batch in enumerate(dataloader):
             if i >= num_batches: break
             input_ids = batch['input_ids'].to(device)
-            outputs = model(input_ids=input_ids, output_hidden_states=True, return_dict=True)
+            outputs = model(input_ids=input_ids, output_hidden_states=True, return_dict=True, use_cache=False)
             
             h = outputs.hidden_states[-1] 
             if torch.isnan(h).any(): continue
@@ -78,12 +76,36 @@ def compute_detailed_scores(model, dataloader, mean_vector, dataset, batch_size,
     all_mse, all_latent, all_labels = [], [], []
     tm_dataset = dataset.dataset
     
+    # Updated label logic for Renomeado dataset
+    # We rely on filenames in meta.json which is loaded by GeneralDataset/BinaryDataset
+    
     def get_label_for_seq(seq_idx):
-        ds_idx = binary_search(tm_dataset.cumsum_lengths, seq_idx)
-        sub_ds = tm_dataset.datasets[ds_idx]
-        offset_in_ds = seq_idx - tm_dataset.cumsum_lengths[ds_idx]
-        file_path = sub_ds.seq_infos[offset_in_ds]['file']
-        return 0 if os.path.basename(file_path).startswith('0_') else 1
+        try:
+            ds_idx = binary_search(tm_dataset.cumsum_lengths, seq_idx)
+            sub_ds = tm_dataset.datasets[ds_idx]
+            offset_in_ds = seq_idx - tm_dataset.cumsum_lengths[ds_idx]
+            
+            # Retrieve class from meta info if available (BinaryDataset usually has .meta)
+            # Or parse filename from seq_infos if GeneralDataset
+            
+            label = 1 # Default Anomaly
+            
+            if hasattr(sub_ds, 'meta_infos'):
+                # BinaryDataset
+                meta = sub_ds.meta_infos[offset_in_ds]
+                # Assuming 'class' field exists in meta.json we wrote
+                if 'class' in meta:
+                    label = 0 if meta['class'] == 0 else 1
+                elif 'file' in meta:
+                    label = 0 if os.path.basename(meta['file']).startswith('0_') else 1
+            elif hasattr(sub_ds, 'seq_infos'):
+                # GeneralDataset
+                file_path = sub_ds.seq_infos[offset_in_ds]['file']
+                label = 0 if os.path.basename(file_path).startswith('0_') else 1
+            
+            return label
+        except:
+            return 1
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(dataloader):
@@ -92,7 +114,7 @@ def compute_detailed_scores(model, dataloader, mean_vector, dataset, batch_size,
             labels = batch['labels'].to(device)
             if len(labels.shape) == 2: labels = labels.unsqueeze(-1)
             
-            outputs = model(input_ids=input_ids, output_hidden_states=True, return_dict=True)
+            outputs = model(input_ids=input_ids, output_hidden_states=True, return_dict=True, use_cache=False)
             h = outputs.hidden_states[-1]
             
             # L1: MSE
@@ -115,43 +137,6 @@ def compute_detailed_scores(model, dataloader, mean_vector, dataset, batch_size,
             
     return np.concatenate(all_mse), np.concatenate(all_latent), np.array(all_labels)
 
-class AuxLossWarmupCallback(TrainerCallback):
-    def __init__(self, target=0.01, warmup_ratio=0.10):
-        self.target = target
-        self.warmup_ratio = warmup_ratio
-        self.warmup_steps = 100 # Default fallback
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        if state.max_steps > 0:
-            self.warmup_steps = max(1, int(state.max_steps * self.warmup_ratio))
-        print(f"[Agent] Aux Loss Warmup: Target={self.target}, Steps={self.warmup_steps}")
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        model = kwargs["model"]
-        step = state.global_step
-
-        if step < self.warmup_steps:
-            factor = self.target * (step / self.warmup_steps)
-        else:
-            factor = self.target
-
-        # Update both config and model attribute if present
-        if hasattr(model.config, "router_aux_loss_factor"):
-            model.config.router_aux_loss_factor = factor
-        
-        # Some implementations might copy it to the model instance
-        if hasattr(model, "router_aux_loss_factor"):
-            model.router_aux_loss_factor = factor
-
-def init_router_weights(model):
-    print("[Agent] Re-initializing Router weights for stability...")
-    for name, module in model.named_modules():
-        # Identify the gating layer (usually 'gate' or 'router')
-        if "gate" in name and isinstance(module, torch.nn.Linear):
-            # Init with small std (0.01) and 0 bias
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
-            if module.bias is not None:
-                torch.nn.init.constant_(module.bias, 0.0)
 class AuxLossWarmupCallback(TrainerCallback):
     def __init__(self, target=0.01, warmup_ratio=0.10):
         self.target = target
@@ -191,13 +176,12 @@ class AgentCallback(TrainerCallback):
         self.test_ds = test_ds
         self.batch_size = batch_size
         self.last_eval_step = 0
-        self.eval_interval_steps = 1000  # Evaluate every 1000 steps (approx 15-20 mins)
+        self.eval_interval_steps = 500
         self.last_save_time = time.time()
 
     def on_step_end(self, args, state, control, **kwargs):
-        # Immediate verification at step 100, then every 1000 steps, or every 5 minutes (300s)
         time_elapsed = time.time() - self.last_save_time
-        if (state.global_step == 100) or (state.global_step - self.last_eval_step >= self.eval_interval_steps) or (time_elapsed >= 300):
+        if (state.global_step == 50) or (state.global_step - self.last_eval_step >= self.eval_interval_steps):
             self.last_save_time = time.time()
             print(f"\n[Agent] Evaluation Triggered (Step {state.global_step}, Time {time_elapsed:.1f}s)...")
             self.evaluate()
@@ -211,11 +195,11 @@ class AgentCallback(TrainerCallback):
         model.eval()
         
         train_loader = DataLoader(self.trainer.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=self.trainer.data_collator)
-        mean_vector, gating_balance = compute_normal_stats(model, train_loader)
+        mean_vector, gating_balance = compute_normal_stats(model, train_loader, num_batches=20)
         
         test_loader = DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, collate_fn=self.trainer.data_collator)
-        # Check first 200 batches (approx 1600 samples) to ensure we hit anomalies
-        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=200)
+        # Check first 50 batches for quick feedback
+        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=50)
         
         f1_l1, _ = search_best_f1(scores_mse, labels)
         f1_l2, _ = search_best_f1(scores_latent, labels)
@@ -236,22 +220,56 @@ class AgentCallback(TrainerCallback):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='full', choices=['full', 'base', 'tiny'])
-    parser.add_argument('--steps', type=int, default=100000)
-    parser.add_argument('--eval_steps', type=int, default=1000)
+    parser.add_argument('--steps', type=int, default=10000)
+    parser.add_argument('--eval_steps', type=int, default=500)
     args = parser.parse_args()
 
-    if args.config == 'full':
-        print("Using FULL config (RTX 3090 mode - 2.4B Corrected)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/config.json', 2, 64, True, True, 2048, "adamw_bnb_8bit"
-    elif args.config == 'base':
-        print("Using BASE config (Time-MoE 50M - Optimized for 3090 SAFETY)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/base_50m.json', 8, 16, True, False, 2048, "adamw_torch"
-    else:
-        print("Using TINY config (Debug mode)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/tiny_config.json', 4, 8, False, False, 1024, "adamw_torch"
+    # Base 50M Config
+    print("Using BASE config (Time-MoE 50M)")
+    CONFIG_PATH = 'Time-MoE/model_config/base_50m.json'
+    BATCH_SIZE = 8
+    GRAD_ACCUM = 16
+    BF16 = True
+    GRAD_CHK = False
+    MAX_LENGTH = 2048
+    OPTIM = "adamw_torch"
 
-    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints', 'dataset_bin/train', 'dataset_bin/test'
+    OUTPUT_DIR = 'checkpoints_renomeado'
+    TRAIN_DATA = 'Time-MoE/dataset_renomeado/train'
+    TEST_DATA = 'Time-MoE/dataset_renomeado/test'
+    
+    # Ensure config exists
+    if not os.path.exists(CONFIG_PATH):
+        # Create base config if missing
+        base_config = {
+            "model_type": "time_moe",
+            "input_size": 1,
+            "hidden_size": 512,
+            "intermediate_size": 2048,
+            "horizon_lengths": [1, 8, 32, 64],
+            "num_hidden_layers": 6,
+            "num_attention_heads": 8,
+            "num_key_value_heads": 8,
+            "hidden_act": "silu",
+            "num_experts_per_tok": 2,
+            "num_experts": 8,
+            "max_position_embeddings": 2048,
+            "initializer_range": 0.02,
+            "rms_norm_eps": 1e-5,
+            "use_cache": True,
+            "use_dense": False,
+            "rope_theta": 10000,
+            "attention_dropout": 0.0,
+            "apply_aux_loss": True,
+            "router_aux_loss_factor": 0.02,
+            "tie_word_embeddings": False,
+            "torch_dtype": "bfloat16",
+            "transformers_version": "4.40.1"
+        }
+        os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+        with open(CONFIG_PATH, 'w') as f:
+            json.dump(base_config, f, indent=2)
+
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
     config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
     config.output_hidden_states = True 
@@ -260,31 +278,25 @@ def main():
     train_ds = runner.get_train_dataset(TRAIN_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=True)
     test_ds = runner.get_train_dataset(TEST_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=False) 
     
-    # 2. Re-init router for stability
     init_router_weights(model)
-
-    try:
-        import bitsandbytes
-    except ImportError:
-        if OPTIM == "adamw_bnb_8bit": OPTIM = "adamw_torch"
 
     from time_moe.trainer.hf_trainer import TimeMoETrainingArguments, TimeMoeTrainer
     training_args = TimeMoETrainingArguments(
         output_dir=OUTPUT_DIR, max_steps=args.steps, per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
-        warmup_steps=100, max_grad_norm=0.5, optim=OPTIM, logging_steps=1, save_steps=args.eval_steps, 
-        bf16=BF16, gradient_checkpointing=GRAD_CHK, dataloader_num_workers=8, dataloader_pin_memory=True,
+        warmup_steps=100, max_grad_norm=0.5, optim=OPTIM, logging_steps=10, save_steps=args.eval_steps, 
+        bf16=BF16, gradient_checkpointing=GRAD_CHK, dataloader_num_workers=4, dataloader_pin_memory=True,
         dataloader_prefetch_factor=2, remove_unused_columns=False
     )
     
-    trainer = TimeMoeT = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
+    trainer = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
     
     agent_cb = AgentCallback(trainer, test_ds, BATCH_SIZE)
     agent_cb.eval_interval_steps = args.eval_steps
     trainer.add_callback(agent_cb)
     trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
     
-    print("Starting Training with Agent...")
+    print("Starting Training on Renomeado (Class 0 only)...")
     trainer.train()
 
 if __name__ == "__main__":
