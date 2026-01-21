@@ -96,16 +96,25 @@ class TimeMoEDataset(TimeSeriesDataset):
 def zero_scaler(seq):
     if not isinstance(seq, np.ndarray):
         seq = np.array(seq)
+    
+    # 1. Clean input: Remove NaNs/Infs immediately
+    seq = np.nan_to_num(seq, nan=0.0, posinf=0.0, neginf=0.0)
+    
     origin_dtype = seq.dtype
-    # std_val = seq.std(dtype=np.float64)
-    # mean_val = seq.mean(dtype=np.float64)
     mean_val = seq.mean()
     std_val = seq.std()
-    if std_val == 0:
+    
+    # 2. Safe normalization (Zero-variance and Epsilon)
+    if std_val < 1e-6:
+        # Zero variance: just center it (will become all zeros)
         normed_seq = seq - mean_val
     else:
-        normed_seq = (seq - mean_val) / std_val
+        # Add epsilon to prevent division by very small numbers
+        normed_seq = (seq - mean_val) / (std_val + 1e-6)
 
+    # 3. Final safety check: if any NaNs slipped through (e.g. if mean_val was nan)
+    normed_seq = np.nan_to_num(normed_seq, nan=0.0, posinf=0.0, neginf=0.0)
+    
     return normed_seq.astype(origin_dtype)
 
 
