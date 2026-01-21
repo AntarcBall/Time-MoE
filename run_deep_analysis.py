@@ -58,6 +58,12 @@ def run_analysis(ckpt_path, output_dir):
     # Analyze first 200 batches (~800 samples) to save time
     mse_scores, latent_scores, labels = compute_detailed_scores(model, test_loader, mean_vector, test_ds, BATCH_SIZE, limit=200)
     
+    # [DEBUG] Print Label Distribution directly to console
+    unique, counts = np.unique(labels, return_counts=True)
+    print(f"\n[DIAGNOSIS] Test Set Label Distribution (Sampled): {dict(zip(unique, counts))}")
+    print(f"[DIAGNOSIS] MSE Score Stats: Min={mse_scores.min():.6f}, Max={mse_scores.max():.6f}, Mean={mse_scores.mean():.6f}")
+    print(f"[DIAGNOSIS] Latent Score Stats: Min={latent_scores.min():.6f}, Max={latent_scores.max():.6f}, Mean={latent_scores.mean():.6f}\n")
+    
     # --- Analysis 1: Score Distribution ---
     print("Generating Score Distribution Plot...")
     plt.figure(figsize=(12, 5))

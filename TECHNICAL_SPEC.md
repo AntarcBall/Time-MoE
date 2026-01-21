@@ -40,6 +40,15 @@
 
 ## 3. 하이퍼파라미터 및 학습 전략 (Training Strategy)
 
+### **Phase 3: 단일 클래스 학습 및 추론 로직 (Single-Class Logic)**
+본 모델은 Group 0(정상)만을 학습하여 Group 0~6(전체)을 분별하는 단일 클래스 이상 탐지(Single-Class Anomaly Detection) 문제를 수행합니다.
+
+* **Huber Loss 기반 학습**: 정상 데이터(Class 0)에 대해 이상치에 강건한 Huber Loss를 적용하여 미래 값을 예측하도록 학습합니다.
+* **보조 손실(Auxiliary Loss)**: 라우팅 붕괴를 막기 위해 전문가 간 부하를 균형 있게 조절합니다.
+* **하이브리드 이상치 점수**:
+    1. **예측 오차**: 모든 다해상도 헤드에서 발생하는 예측 MSE의 가중합.
+    2. **잠재 거리**: 모델 최종 블록의 Output Hidden State와 정상 데이터의 평균 벡터 사이의 거리.
+
 ### **핵심 파라미터 및 최적화**
 - **Learning Rate**: 1e-4 (표준 Transformer 스크래치 학습 수준). 안정적 안착을 위해 초기 선형 웜업(Warmup) 스케줄링 적용.
 - **Effective Batch Size**: 128 (물리 배치 8 × 그래디언트 누적 16). MoE 라우팅의 통계적 안정성을 보장할 만큼 충분히 큰 배치를 형성함.

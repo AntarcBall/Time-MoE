@@ -16,6 +16,11 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
     try:
         max_chunk_size = (1 << 30) * 1  # 1GB chunks
         
+        # Shuffle files to ensure mixed classes in binary chunks (critical for partial evaluation)
+        import random
+        random.seed(42)
+        random.shuffle(npy_files)
+        
         sequence = []
         meta = {}
         meta['dtype'] = dtype
