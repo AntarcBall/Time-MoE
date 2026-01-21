@@ -26,8 +26,8 @@ def run_analysis(ckpt_path, output_dir):
         return
 
     # Data Loading (Sample)
-    TRAIN_DATA = 'dataset_bin/train'
-    TEST_DATA = 'dataset_bin/test'
+    TRAIN_DATA = 'Time-MoE/dataset_bin/train'
+    TEST_DATA = 'Time-MoE/dataset_bin/test'
     MAX_LENGTH = 2048
     BATCH_SIZE = 4
     

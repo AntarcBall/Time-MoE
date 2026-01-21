@@ -23,10 +23,10 @@ except:
 
 # 1. 체크포인트 현황
 st.header("📂 Saved Checkpoints")
-ckpt_dir = "checkpoints"
+ckpt_dir = "Time-MoE/checkpoints"
 
 # 로그 데이터 먼저 파싱 (체크포인트와 매칭하기 위함)
-log_path = "run_base.log"
+log_path = "Time-MoE/run_base.log"
 log_df = pd.DataFrame()
 if os.path.exists(log_path):
     with open(log_path, 'r') as f:
@@ -127,14 +127,14 @@ if os.path.exists(ckpt_dir):
                 # Note: Assuming training is NOT running or VRAM is shared
                 import subprocess
                 ckpt_path = os.path.join(ckpt_dir, selected_ckpt)
-                output_dir = os.path.join("analysis_results", selected_ckpt)
+                output_dir = os.path.join("Time-MoE/analysis_results", selected_ckpt)
                 
                 # Check VRAM safety (simple check)
                 # If training is running, this might fail or slow down training
                 # We add a warning
                 st.warning("⚠️ Running analysis while training is active may cause OOM. Pause training if needed.")
                 
-                cmd = ["python3", "run_deep_analysis.py", ckpt_path, output_dir]
+                cmd = ["python3", "Time-MoE/run_deep_analysis.py", ckpt_path, output_dir]
                 process = subprocess.run(cmd, capture_output=True, text=True)
                 
                 if process.returncode == 0:
@@ -144,7 +144,7 @@ if os.path.exists(ckpt_dir):
 
         # Display Results if available
         # 버튼을 누르지 않아도, 이미 분석된 결과가 있으면 보여주도록 로직 수정
-        output_dir = os.path.join("analysis_results", selected_ckpt) if 'selected_ckpt' in locals() else None
+        output_dir = os.path.join("Time-MoE/analysis_results", selected_ckpt) if 'selected_ckpt' in locals() else None
         
         if output_dir and os.path.isdir(output_dir):
             # Check if any images exist

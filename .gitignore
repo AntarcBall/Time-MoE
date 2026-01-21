@@ -2,6 +2,7 @@
 checkpoints
 dataset_npy
 dataset_bin
+checkpoints_backup_1768974147
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

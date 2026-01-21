@@ -280,7 +280,7 @@ def main():
     
     trainer = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
     trainer.add_callback(AgentCallback(trainer, test_ds, BATCH_SIZE))
-    trainer.add_callback(AuxLossWarmupCallback(target=0.01, warmup_ratio=0.1))
+    trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
     
     print("Starting Training with Agent...")
     trainer.train()
