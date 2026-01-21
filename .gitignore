@@ -1,3 +1,8 @@
+/Renomeado
+checkpoints
+dataset_npy
+dataset_bin
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

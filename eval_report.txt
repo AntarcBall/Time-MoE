@@ -1,0 +1,10 @@
+The following generation flags are not valid and may be ignored: ['output_hidden_states']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+Loading checkpoint from: checkpoints/checkpoint-step-10
+Loading checkpoint shards:   0%|          | 0/2 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 2/2 [00:00<00:00, 35.65it/s]
+2026-01-20 10:03:45,081 - log_util.py[pid:513500;line:52:log_in_local_rank_0] - INFO: Loading dataset...
+2026-01-20 10:03:45,082 - log_util.py[pid:513500;line:52:log_in_local_rank_0] - INFO: Processing dataset to fixed-size sub-sequences...
+  0%|          | 0/1128 [00:00<?, ?it/s]100%|██████████| 1128/1128 [00:00<00:00, 225519.56it/s]
+2026-01-20 10:03:45,087 - log_util.py[pid:513500;line:52:log_in_local_rank_0] - INFO: Loading dataset...
+2026-01-20 10:03:45,092 - log_util.py[pid:513500;line:52:log_in_local_rank_0] - INFO: Processing dataset to fixed-size sub-sequences...
+  0%|          | 0/9340 [00:00<?, ?it/s]  3%|▎         | 292/9340 [00:00<00:03, 2591.06it/s]100%|██████████| 9340/9340 [00:00<00:00, 61965.73it/s]
+past_key_values should not be None in from_legacy_cache()
