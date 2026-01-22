@@ -393,7 +393,7 @@ def main():
     
     # LOAD PRE-TRAINED MODEL
     try:
-        model = AutoModelForCausalLM.from_pretrained(
+        model = TimeMoeForPrediction.from_pretrained(
             MODEL_ID,
             trust_remote_code=True,
             torch_dtype=torch.bfloat16 if BF16 else torch.float32,
@@ -436,6 +436,25 @@ def main():
     # to avoid carrying over bias from general pre-training.
     init_router_weights(model)
 
+    print("[Agent] Applying Partial Freezing Strategy...")
+    frozen_params = []
+    unfrozen_params = []
+    
+    for name, param in model.named_parameters():
+        # Default unfreeze
+        param.requires_grad = True
+        
+        # Freeze experts (MLP layers inside MoE)
+        # Check if parameter is part of the 'experts' ModuleList in TimeMoeSparseExpertsLayer
+        if "experts." in name and "shared_expert" not in name:
+             param.requires_grad = False
+             frozen_params.append(name)
+        else:
+             unfrozen_params.append(name)
+             
+    print(f"[Agent] Frozen {len(frozen_params)} parameters (Sparse Experts).")
+    print(f"[Agent] Unfrozen {len(unfrozen_params)} parameters (Router, Attn, Shared, Head).")
+
     try:
         import bitsandbytes
     except ImportError:
@@ -447,8 +466,8 @@ def main():
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
         max_grad_norm=1.0, save_steps=EVAL_STEPS, 
         bf16=BF16, gradient_checkpointing=GRAD_CHK, 
-        dataloader_num_workers=0, # WSL optimization: avoid multiprocessing overhead
-        dataloader_pin_memory=False, # WSL optimization: reduce memory pinning overhead
+        dataloader_num_workers=4, # WSL optimization: avoid multiprocessing overhead
+        dataloader_pin_memory=True, # WSL optimization: reduce memory pinning overhead
         dataloader_prefetch_factor=None, # Disabled when num_workers=0
         remove_unused_columns=False
     )
