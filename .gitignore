@@ -5,6 +5,7 @@ dataset_bin
 checkpoints_backup_1768974147
 dataset_renomeado
 processed_bin
+*.dot 
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
