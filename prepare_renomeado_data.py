@@ -159,8 +159,29 @@ def create_bin_dataset(file_list, output_dir, split_name):
             })
             current_offset += length
             
+    # Create meta.json expected by BinaryDataset
+    # It expects: 'num_sequences', 'dtype', 'scales' (list of dicts with offset/length/mean/std), 'files' (dict of filename: length)
+    
+    # We will compute mean/std or just dummy if not needed? 
+    # BinaryDataset uses mean/std for denormalization if present. 
+    # TimeMoEDataset handles normalization on top.
+    
+    # We only have one file: data-1-of-1.bin
+    files_info = {f'data-1-of-1.bin': current_offset}
+    
+    # Re-structure meta_infos to match 'scales' in BinaryDataset
+    # BinaryDataset expects a list where each item is {offset, length, ...}
+    # Our meta_infos is already that list.
+    
+    final_meta = {
+        "num_sequences": len(meta_infos),
+        "dtype": "float32",
+        "files": files_info,
+        "scales": meta_infos
+    }
+    
     with open(meta_path, 'w') as f_meta:
-        json.dump(meta_infos, f_meta, indent=2)
+        json.dump(final_meta, f_meta, indent=2)
 
 def main():
     files = glob.glob(os.path.join(SOURCE_DIR, '*.csv'))

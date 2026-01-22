@@ -195,9 +195,9 @@ class AgentCallback(TrainerCallback):
         self.last_save_time = time.time()
 
     def on_step_end(self, args, state, control, **kwargs):
-        # Immediate verification at step 100, then every 1000 steps, or every 5 minutes (300s)
+        # Immediate verification at step 100, then every 1000 steps, or every 60 minutes (3600s)
         time_elapsed = time.time() - self.last_save_time
-        if (state.global_step == 100) or (state.global_step - self.last_eval_step >= self.eval_interval_steps) or (time_elapsed >= 300):
+        if (state.global_step == 100) or (state.global_step - self.last_eval_step >= self.eval_interval_steps) or (time_elapsed >= 3600):
             self.last_save_time = time.time()
             print(f"\n[Agent] Evaluation Triggered (Step {state.global_step}, Time {time_elapsed:.1f}s)...")
             self.evaluate()
@@ -214,8 +214,8 @@ class AgentCallback(TrainerCallback):
         mean_vector, gating_balance = compute_normal_stats(model, train_loader)
         
         test_loader = DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, collate_fn=self.trainer.data_collator)
-        # Check first 200 batches (approx 1600 samples) to ensure we hit anomalies
-        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=200)
+        # Check first 50 batches (approx 400 samples) to ensure we hit anomalies
+        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=50)
         
         f1_l1, _ = search_best_f1(scores_mse, labels)
         f1_l2, _ = search_best_f1(scores_latent, labels)
@@ -272,7 +272,7 @@ def main():
     training_args = TimeMoETrainingArguments(
         output_dir=OUTPUT_DIR, max_steps=args.steps, per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
-        warmup_steps=100, max_grad_norm=0.5, optim=OPTIM, logging_steps=1, save_steps=args.eval_steps, 
+        warmup_steps=100, max_grad_normsteps=1, save_steps=args.eval_steps, 
         bf16=BF16, gradient_checkpointing=GRAD_CHK, dataloader_num_workers=8, dataloader_pin_memory=True,
         dataloader_prefetch_factor=2, remove_unused_columns=False
     )

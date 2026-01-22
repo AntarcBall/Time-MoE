@@ -7,6 +7,10 @@ import random
 import shutil
 
 # Re-engineered Data Pipeline: Strict Isolation for Single-Class AD
+# Author: Sisyphus
+# Strategy: 
+# 1. TRAIN: Only Group 0 (Normal). Purity 100%.
+# 2. TEST: Mixed Group 0 + Group 1-6. For realistic Anomaly Detection evaluation.
 
 def save_array_to_bin(arr, fn):
     with open(fn, mode='wb') as file:
@@ -28,6 +32,7 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
         print(f"Processing {len(npy_files)} files into {out_folder}...")
         
         for f in npy_files:
+            # Load and ensure float32
             seq = np.load(f).astype(np.float32)
             
             # Metadata tracking for random access
@@ -46,6 +51,8 @@ def process_to_bin(npy_files, out_folder, dtype='float32'):
             
         sequence = np.concatenate(sequence, axis=0)
         meta['num_sequences'] = len(npy_files)
+        # Add total_points to meta for better debugging
+        meta['total_points'] = len(sequence)
         
         # Save sequence in chunks
         memory_size = sequence.nbytes
@@ -108,16 +115,17 @@ def strict_isolation_split():
     random.shuffle(normals)
     
     # Train Set: 90% of Normals ONLY
-    # Purity = 100%
+    # This guarantees the model ONLY sees normal data during training.
     split_idx = int(len(normals) * 0.90)
     train_set = normals[:split_idx]
     
     # Validation/Test Set: Remaining 10% Normals + 100% Anomalies
-    # This creates a realistic evaluation scenario
+    # This creates a realistic evaluation scenario where we test if the model 
+    # can distinguish the held-out normals from the anomalies.
     test_set = normals[split_idx:] + anomalies
     
     # CRITICAL: Shuffle Test Set
-    # This prevents "all normals then all anomalies" which breaks partial evaluation
+    # This prevents "all normals then all anomalies" which breaks partial evaluation in DataLoader
     random.shuffle(test_set)
     
     print(f"  -> Final Train Set: {len(train_set)} files (Pure Normal)")
@@ -126,12 +134,16 @@ def strict_isolation_split():
     # 4. Execute Conversion
     # Clear existing bins to prevent contamination from old chunks
     if os.path.exists('dataset_bin'):
+        print("Cleaning old dataset_bin...")
         shutil.rmtree('dataset_bin')
     
+    print("\n[Processing Train Set]")
     process_to_bin(train_set, 'dataset_bin/train')
+    
+    print("\n[Processing Test Set]")
     process_to_bin(test_set, 'dataset_bin/test')
     
-    print("Strict Isolation Split Completed Successfully.")
+    print("\nStrict Isolation Split Completed Successfully.")
 
 if __name__ == "__main__":
     strict_isolation_split()

@@ -76,9 +76,6 @@ def compute_detailed_scores(model, dataloader, mean_vector, dataset, batch_size,
     all_mse, all_latent, all_labels = [], [], []
     tm_dataset = dataset.dataset
     
-    # Updated label logic for Renomeado dataset
-    # We rely on filenames in meta.json which is loaded by GeneralDataset/BinaryDataset
-    
     def get_label_for_seq(seq_idx):
         try:
             ds_idx = binary_search(tm_dataset.cumsum_lengths, seq_idx)
@@ -181,7 +178,8 @@ class AgentCallback(TrainerCallback):
 
     def on_step_end(self, args, state, control, **kwargs):
         time_elapsed = time.time() - self.last_save_time
-        if (state.global_step == 50) or (state.global_step - self.last_eval_step >= self.eval_interval_steps):
+        # Simplified condition for debugging
+        if state.global_step % self.eval_interval_steps == 0:
             self.last_save_time = time.time()
             print(f"\n[Agent] Evaluation Triggered (Step {state.global_step}, Time {time_elapsed:.1f}s)...")
             self.evaluate()
@@ -198,8 +196,8 @@ class AgentCallback(TrainerCallback):
         mean_vector, gating_balance = compute_normal_stats(model, train_loader, num_batches=20)
         
         test_loader = DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, collate_fn=self.trainer.data_collator)
-        # Check first 50 batches for quick feedback
-        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=50)
+        # Check first 5 batches for quick feedback in limited environment
+        scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=5)
         
         f1_l1, _ = search_best_f1(scores_mse, labels)
         f1_l2, _ = search_best_f1(scores_latent, labels)
@@ -220,8 +218,9 @@ class AgentCallback(TrainerCallback):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--steps', type=int, default=10000)
-    parser.add_argument('--eval_steps', type=int, default=500)
+    # Run for minimal steps to confirm checkpoint saving
+    parser.add_argument('--steps', type=int, default=10)
+    parser.add_argument('--eval_steps', type=int, default=5)
     args = parser.parse_args()
 
     # Base 50M Config
@@ -297,6 +296,12 @@ def main():
     trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
     
     print("Starting Training on Renomeado (Class 0 only)...")
+    
+    # Disable cache in config before training to avoid "past_key_values should not be None" warning/error
+    # This warning comes from DynamicCache.from_legacy_cache() when use_cache=True during forward pass in Trainer
+    # Trainer loop uses model(**inputs) which defaults to config.use_cache
+    model.config.use_cache = False
+    
     trainer.train()
 
 if __name__ == "__main__":
