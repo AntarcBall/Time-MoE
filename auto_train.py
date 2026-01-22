@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import json
 import time
+import random
 import argparse
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -19,6 +20,54 @@ from time_moe.models.modeling_time_moe import TimeMoeForPrediction, TimeMoeConfi
 from time_moe.utils.log_util import log_in_local_rank_0
 from time_moe.datasets.time_moe_dataset import TimeMoEDataset, binary_search
 from time_moe.datasets.time_moe_window_dataset import TimeMoEWindowDataset
+
+class DirectTimeMoEDataset:
+    """
+    Optimization: Direct wrapper for pre-segmented binary datasets.
+    Bypasses the heavy TimeMoEWindowDataset logic since data is already chopped to correct size.
+    """
+    def __init__(self, base_dataset, max_length, shuffle=False):
+        self.dataset = base_dataset
+        self.max_length = max_length
+        self.indices = list(range(len(base_dataset)))
+        if shuffle:
+            random.shuffle(self.indices)
+            
+        # Mocking sub_seq_indexes for compatibility with compute_detailed_scores
+        # format: (seq_idx, offset)
+        self.sub_seq_indexes = [(i, 0) for i in self.indices]
+
+    def __len__(self):
+        return len(self.dataset)
+    
+    def __getitem__(self, idx):
+        # Direct access via shuffled index
+        real_idx = self.indices[idx]
+        seq = self.dataset[real_idx]
+        
+        # Ensure numpy float32
+        if not isinstance(seq, np.ndarray):
+            seq = np.array(seq, dtype=np.float32)
+            
+        # Safety padding if segment is shorter than max_length + 1
+        # Target length is max_length + 1 (input + label)
+        target_len = self.max_length + 1
+        loss_mask = np.ones(len(seq) - 1, dtype=np.int32)
+        
+        if len(seq) < target_len:
+            n_pad = target_len - len(seq)
+            seq = np.pad(seq, (0, n_pad), 'constant', constant_values=0)
+            loss_mask = np.pad(loss_mask, (0, n_pad), 'constant', constant_values=0)
+        elif len(seq) > target_len:
+            # Crop if too long (shouldn't happen with current preprocess)
+            seq = seq[:target_len]
+            loss_mask = loss_mask[:target_len-1]
+            
+        return {
+            'input_ids': seq[:-1],
+            'labels': seq[1:],
+            'loss_masks': loss_mask
+        }
 
 # Global Helpers
 def search_best_f1(scores, labels):
@@ -324,12 +373,18 @@ def main():
     model = TimeMoeForPrediction(config)
     
     train_ds = runner.get_train_dataset(TRAIN_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=True)
+    # Optimization: Wrap with DirectDataset if using pre-segmented data
+    if "processed_bin" in TRAIN_DATA:
+        log_in_local_rank_0('Optimization: Using DirectTimeMoEDataset for TRAIN...')
+        train_ds = DirectTimeMoEDataset(train_ds.dataset, MAX_LENGTH, shuffle=True)
+
     # CRITICAL FIX: Ensure test dataset is shuffled to mix Normal/Anomaly in the first few batches
     log_in_local_rank_0('Loading TEST dataset...')
     test_raw_ds = TimeMoEDataset(TEST_DATA, normalization_method="zero")
-    log_in_local_rank_0('Processing TEST dataset with shuffle=True...')
-    # Using shuffle=True here ensures the sub_seq_indexes are randomized
-    test_ds = TimeMoEWindowDataset(test_raw_ds, context_length=MAX_LENGTH, prediction_length=0, stride=MAX_LENGTH, shuffle=True, random_offset=True)
+    
+    # Optimization: Use DirectDataset for Test as well
+    log_in_local_rank_0('Optimization: Using DirectTimeMoEDataset for TEST...')
+    test_ds = DirectTimeMoEDataset(test_raw_ds, MAX_LENGTH, shuffle=True)
     
     # 2. Re-init router for stability
     init_router_weights(model)
