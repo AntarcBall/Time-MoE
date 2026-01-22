@@ -23,7 +23,7 @@
   "torch_dtype": "bfloat16",
   "transformers_version": "4.40.1",
   "training_config": {
-    "batch_size": 64,
+    "batch_size": 8,
     "gradient_accumulation_steps": 16,
     "max_steps": 100000,
     "eval_steps": 1000,

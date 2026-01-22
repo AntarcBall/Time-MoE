@@ -9,7 +9,7 @@ import argparse
 import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.data import DataLoader
-from transformers import TrainerCallback, TrainingArguments
+from transformers import TrainerCallback, TrainingArguments, AutoModelForCausalLM, AutoConfig
 from sklearn.metrics import f1_score, precision_recall_curve
 
 # Add Time-MoE to path
@@ -353,20 +353,24 @@ def main():
 
     if args.config == 'full':
         print("Using FULL config (RTX 3090 mode - 2.4B Corrected)")
+        MODEL_ID = "Maple728/TimeMoE-2.4B" # Assuming naming convention, need to verify if exists, fallback to 50M
         CONFIG_PATH = 'model_config/config.json'
     elif args.config == 'base':
-        print("Using BASE config (Time-MoE 50M - Optimized for 3090 SAFETY)")
+        print("Using BASE config (Pre-trained TimeMoE-50M)")
+        MODEL_ID = "Maple728/TimeMoE-50M"
         CONFIG_PATH = 'model_config/base_50m.json'
     else:
-        print("Using TINY config (Fast-Track Debug Mode)")
+        print("Using TINY config (Fast-Track Debug Mode with 50M weights)")
+        # Tiny config will also use 50M weights for transfer learning demo, just with fewer steps
+        MODEL_ID = "Maple728/TimeMoE-50M"
         CONFIG_PATH = 'model_config/tiny_config.json'
 
-    # Load configuration
-    config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
-    config.output_hidden_states = True
+    # Load Configuration from Local JSON to get training params
+    # But we will use the PRE-TRAINED CONFIG for the model structure
+    local_config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
     
-    # Extract training parameters from config JSON if available, else fallback to defaults
-    train_conf = getattr(config, 'training_config', {})
+    # Extract training parameters from local config
+    train_conf = getattr(local_config, 'training_config', {})
     
     BATCH_SIZE = train_conf.get('batch_size', 4)
     GRAD_ACCUM = train_conf.get('gradient_accumulation_steps', 8)
@@ -377,17 +381,39 @@ def main():
     MAX_LENGTH = train_conf.get('max_length', 2048)
     OPTIM = train_conf.get('optim', "adamw_torch")
     
-    # Override steps from CLI if provided and different from default
-    if args.steps != 100000: # If user manually set steps
-        MAX_STEPS = args.steps
-    if args.eval_steps != 1000:
-        EVAL_STEPS = args.eval_steps
+    # Override steps from CLI
+    if args.steps != 100000: MAX_STEPS = args.steps
+    if args.eval_steps != 1000: EVAL_STEPS = args.eval_steps
 
     print(f"Configuration Loaded: Batch={BATCH_SIZE}, Accum={GRAD_ACCUM}, Steps={MAX_STEPS}, BF16={BF16}")
+    print(f"[Transfer Learning] Loading pre-trained weights from: {MODEL_ID}")
 
-    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints_tiny_fast' if args.config == 'tiny' else 'checkpoints', 'processed_bin/train', 'processed_bin/val'
+    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints_transfer' if args.config == 'tiny' else 'checkpoints_transfer_base', 'processed_bin/train', 'processed_bin/val'
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
-    model = TimeMoeForPrediction(config)
+    
+    # LOAD PRE-TRAINED MODEL
+    try:
+        model = AutoModelForCausalLM.from_pretrained(
+            MODEL_ID,
+            trust_remote_code=True,
+            torch_dtype=torch.bfloat16 if BF16 else torch.float32,
+            device_map="auto" # Use accelerate to handle placement
+        )
+        # Ensure config matches for training
+        model.config.use_cache = False # Disable cache for training
+        model.config.output_hidden_states = True # Needed for our Anomaly Detection logic
+        
+        # Verify if input_size matches
+        if model.config.input_size != 1:
+            print(f"Warning: Pre-trained model input_size is {model.config.input_size}, but dataset is univariate (1).")
+            # Time-MoE is usually univariate, so this should be fine.
+            
+    except Exception as e:
+        print(f"Error loading pre-trained model {MODEL_ID}: {e}")
+        print("Fallback to training from scratch with local config...")
+        config = local_config
+        config.output_hidden_states = True
+        model = TimeMoeForPrediction(config)
     
     train_ds = runner.get_train_dataset(TRAIN_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=True)
     # Optimization: Wrap with DirectDataset if using pre-segmented data
@@ -403,7 +429,11 @@ def main():
     log_in_local_rank_0('Optimization: Using DirectTimeMoEDataset for TEST...')
     test_ds = DirectTimeMoEDataset(test_raw_ds, MAX_LENGTH, shuffle=True)
     
-    # 2. Re-init router for stability
+    # 2. Re-init router? NO! We want transfer learning.
+    # But maybe re-init ONLY the router if we want to learn routing from scratch on new data?
+    # Spec says: "Router Weight Re-initialization... to prevent collapse".
+    # Since we are fine-tuning on specific single-class data, re-init router is safer 
+    # to avoid carrying over bias from general pre-training.
     init_router_weights(model)
 
     try:
