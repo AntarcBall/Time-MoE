@@ -444,16 +444,16 @@ def main():
         # Default unfreeze
         param.requires_grad = True
         
-        # Freeze experts (MLP layers inside MoE)
-        # Check if parameter is part of the 'experts' ModuleList in TimeMoeSparseExpertsLayer
-        if "experts." in name and "shared_expert" not in name:
+        # Freeze experts AND Attention (MLP layers inside MoE + Self-Attention)
+        # Check if parameter is part of the 'experts' ModuleList OR 'self_attn'
+        if ("experts." in name and "shared_expert" not in name) or ("self_attn." in name):
              param.requires_grad = False
              frozen_params.append(name)
         else:
              unfrozen_params.append(name)
              
-    print(f"[Agent] Frozen {len(frozen_params)} parameters (Sparse Experts).")
-    print(f"[Agent] Unfrozen {len(unfrozen_params)} parameters (Router, Attn, Shared, Head).")
+    print(f"[Agent] Frozen {len(frozen_params)} parameters (Sparse Experts + Attention).")
+    print(f"[Agent] Unfrozen {len(unfrozen_params)} parameters (Router, Shared, Head, Embed).")
 
     try:
         import bitsandbytes
