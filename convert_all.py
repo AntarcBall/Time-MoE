@@ -6,144 +6,155 @@ import json
 import random
 import shutil
 
-# Re-engineered Data Pipeline: Strict Isolation for Single-Class AD
-# Author: Sisyphus
-# Strategy: 
-# 1. TRAIN: Only Group 0 (Normal). Purity 100%.
-# 2. TEST: Mixed Group 0 + Group 1-6. For realistic Anomaly Detection evaluation.
+DATA_ROOTS = ['dataset_npy/train', 'dataset_npy/test']
+SAVE_ROOT = 'processed_bin'
 
-def save_array_to_bin(arr, fn):
-    with open(fn, mode='wb') as file:
-        arr.tofile(file)
-
-def process_to_bin(npy_files, out_folder, dtype='float32'):
-    try:
-        max_chunk_size = (1 << 30) * 1  # 1GB chunks
-        
-        sequence = []
-        meta = {}
-        meta['dtype'] = dtype
-        meta['files'] = {}
-        meta['scales'] = [] 
-        
-        idx = 0
-        file_name_format = 'data-{}-of-{}.bin'
-        
-        print(f"Processing {len(npy_files)} files into {out_folder}...")
-        
-        for f in npy_files:
-            # Load and ensure float32
+def save_to_bin_chunked(npy_files, out_folder, dtype='float32'):
+    """
+    Reads files sequentially and writes in fixed-size chunks to minimize memory usage.
+    """
+    os.makedirs(out_folder, exist_ok=True)
+    
+    meta = {
+        'dtype': dtype,
+        'files': {},
+        'scales': [],
+        'num_sequences': 0,
+        'total_points': 0
+    }
+    
+    MAX_CHUNK_BYTES = 1 << 30
+    MAX_CHUNK_ELEMENTS = MAX_CHUNK_BYTES // 4
+    
+    buffer = []
+    buffer_elements = 0
+    current_chunk_idx = 1
+    
+    processed_count = 0
+    global_offset = 0
+    
+    print(f"Processing {len(npy_files)} files into {out_folder}...")
+    
+    for f in npy_files:
+        try:
             seq = np.load(f).astype(np.float32)
+        except Exception as e:
+            print(f"Error loading {f}: {e}")
+            continue
             
-            # Metadata tracking for random access
-            meta['scales'].append({
-                'offset': idx,
-                'length': len(seq),
-                'file': os.path.basename(f)
-            })
-            
-            idx += len(seq)
-            sequence.append(seq)
-            
-        if not sequence:
-            print(f"Warning: No data for {out_folder}")
-            return 0
-            
-        sequence = np.concatenate(sequence, axis=0)
-        meta['num_sequences'] = len(npy_files)
-        # Add total_points to meta for better debugging
-        meta['total_points'] = len(sequence)
+        seq_len = len(seq)
         
-        # Save sequence in chunks
-        memory_size = sequence.nbytes
-        num_chunks = math.ceil(memory_size / max_chunk_size)
-        if num_chunks == 0: num_chunks = 1
-        chunk_length = math.ceil(len(sequence) / num_chunks)
+        meta['scales'].append({
+            'offset': global_offset,
+            'length': seq_len,
+            'file': os.path.basename(f)
+        })
         
-        os.makedirs(out_folder, exist_ok=True)
+        global_offset += seq_len
+        processed_count += 1
         
-        for i in range(num_chunks):
-            start_idx = i * chunk_length
-            end_idx = min(start_idx + chunk_length, len(sequence))
-            sub_seq = sequence[start_idx: end_idx]
-            sub_fn = file_name_format.format(i + 1, num_chunks)
-            out_fn = os.path.join(out_folder, sub_fn)
-            save_array_to_bin(sub_seq, out_fn)
-            meta['files'][sub_fn] = len(sub_seq)
+        buffer.append(seq)
+        buffer_elements += seq_len
+        
+        if buffer_elements >= MAX_CHUNK_ELEMENTS:
+            full_data = np.concatenate(buffer, axis=0)
+            buffer = []
+            buffer_elements = 0
             
-        # Save meta
-        with open(os.path.join(out_folder, 'meta.json'), 'w') as f:
-            json.dump(meta, f, indent=2)
-            
-        return len(sequence)
-        
-    except Exception as e:
-        print(f"Error processing {out_folder}: {e}")
-        return 0
+            start = 0
+            while start < len(full_data):
+                end = start + MAX_CHUNK_ELEMENTS
+                chunk = full_data[start:end]
+                
+                if len(chunk) == MAX_CHUNK_ELEMENTS:
+                    bin_fn = f'data-{current_chunk_idx}-of-placeholder.bin'
+                    out_path = os.path.join(out_folder, bin_fn)
+                    with open(out_path, 'wb') as f_out:
+                        chunk.tofile(f_out)
+                    
+                    meta['files'][bin_fn] = len(chunk)
+                    current_chunk_idx += 1
+                    start = end
+                else:
+                    buffer.append(chunk)
+                    buffer_elements += len(chunk)
+                    break
 
-def strict_isolation_split():
-    # 1. Gather ALL npy files from both directories
-    # We ignore the current folder structure and classify by FILENAME ONLY.
-    src_dirs = ['dataset_npy/train', 'dataset_npy/test']
-    all_files = []
-    for d in src_dirs:
-        files = glob.glob(os.path.join(d, '*.npy'))
-        all_files.extend(files)
+    if buffer_elements > 0:
+        full_data = np.concatenate(buffer, axis=0)
+        bin_fn = f'data-{current_chunk_idx}-of-placeholder.bin'
+        out_path = os.path.join(out_folder, bin_fn)
+        with open(out_path, 'wb') as f_out:
+            full_data.tofile(f_out)
+        meta['files'][bin_fn] = len(full_data)
+        current_chunk_idx += 1
+        
+    num_chunks = current_chunk_idx - 1
     
-    print(f"Total files found: {len(all_files)}")
+    final_files_map = {}
+    for old_name, length in meta['files'].items():
+        idx = int(old_name.split('-')[1])
+        new_name = f'data-{idx}-of-{num_chunks}.bin'
+        os.rename(os.path.join(out_folder, old_name), os.path.join(out_folder, new_name))
+        final_files_map[new_name] = length
+        
+    meta['files'] = final_files_map
+    meta['num_sequences'] = processed_count
+    meta['total_points'] = global_offset
     
-    # 2. Strict Separation
-    # Normal: Starts with '0_'
-    # Anomaly: Starts with '1_' to '6_' (or just not '0_')
+    with open(os.path.join(out_folder, 'meta.json'), 'w') as f:
+        json.dump(meta, f, indent=2)
+        
+    print(f"Saved {processed_count} sequences to {out_folder} in {num_chunks} chunks.")
+
+def prepare_split_dataset_and_convert():
+    normal_files = []
+    anomaly_files = []
     
-    normals = []
-    anomalies = []
-    
-    for f in all_files:
-        fname = os.path.basename(f)
-        if fname.startswith('0_'):
-            normals.append(f)
-        else:
-            anomalies.append(f)
+    print("Scanning for .npy files...")
+    for d in DATA_ROOTS:
+        if not os.path.isdir(d):
+            print(f"Warning: Directory {d} not found.")
+            continue
             
-    print(f"  - Normal Pool (Group 0): {len(normals)}")
-    print(f"  - Anomaly Pool (Group 1-6): {len(anomalies)}")
+        all_files = glob.glob(os.path.join(d, '*.npy'))
+        for f in all_files:
+            fname = os.path.basename(f)
+            if fname.startswith('0_'):
+                normal_files.append(f)
+            else:
+                anomaly_files.append(f)
     
-    # 3. Construct Sets
-    # Shuffle Normals first to ensure random distribution
+    normal_files = sorted(list(set(normal_files)))
+    anomaly_files = sorted(list(set(anomaly_files)))
+
+    print(f"Found {len(normal_files)} Normal files, {len(anomaly_files)} Anomaly files.")
+
     random.seed(42)
-    random.shuffle(normals)
+
+    random.shuffle(normal_files)
     
-    # Train Set: 90% of Normals ONLY
-    # This guarantees the model ONLY sees normal data during training.
-    split_idx = int(len(normals) * 0.90)
-    train_set = normals[:split_idx]
+    split_ratio = 0.9
+    split_idx = int(len(normal_files) * split_ratio)
     
-    # Validation/Test Set: Remaining 10% Normals + 100% Anomalies
-    # This creates a realistic evaluation scenario where we test if the model 
-    # can distinguish the held-out normals from the anomalies.
-    test_set = normals[split_idx:] + anomalies
+    train_files = normal_files[:split_idx]
+    val_normal_files = normal_files[split_idx:]
     
-    # CRITICAL: Shuffle Test Set
-    # This prevents "all normals then all anomalies" which breaks partial evaluation in DataLoader
-    random.shuffle(test_set)
-    
-    print(f"  -> Final Train Set: {len(train_set)} files (Pure Normal)")
-    print(f"  -> Final Test Set : {len(test_set)} files (Mixed: {len(normals)-split_idx} Normal + {len(anomalies)} Anomaly)")
-    
-    # 4. Execute Conversion
-    # Clear existing bins to prevent contamination from old chunks
-    if os.path.exists('dataset_bin'):
-        print("Cleaning old dataset_bin...")
-        shutil.rmtree('dataset_bin')
-    
+    val_files = val_normal_files + anomaly_files
+    random.shuffle(val_files)
+
+    print(f"Train Set: {len(train_files)} (All Normal)")
+    print(f"Val Set: {len(val_files)} ({len(val_normal_files)} Normal + {len(anomaly_files)} Anomaly)")
+
+    if os.path.exists(SAVE_ROOT):
+        print(f"Cleaning {SAVE_ROOT}...")
+        shutil.rmtree(SAVE_ROOT)
+        
     print("\n[Processing Train Set]")
-    process_to_bin(train_set, 'dataset_bin/train')
+    save_to_bin_chunked(train_files, os.path.join(SAVE_ROOT, 'train'))
     
-    print("\n[Processing Test Set]")
-    process_to_bin(test_set, 'dataset_bin/test')
-    
-    print("\nStrict Isolation Split Completed Successfully.")
+    print("\n[Processing Val Set]")
+    save_to_bin_chunked(val_files, os.path.join(SAVE_ROOT, 'val'))
 
 if __name__ == "__main__":
-    strict_isolation_split()
+    prepare_split_dataset_and_convert()
