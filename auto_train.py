@@ -251,7 +251,7 @@ def main():
         print("Using TINY config (Debug mode)")
         CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/tiny_config.json', 4, 8, False, False, 1024, "adamw_torch"
 
-    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints', 'dataset_bin/train', 'dataset_bin/test'
+    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints', 'processed_bin/train', 'processed_bin/val'
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
     config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
     config.output_hidden_states = True 
