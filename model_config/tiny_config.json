@@ -26,5 +26,15 @@
   "router_aux_loss_factor": 0.02,
   "tie_word_embeddings": false,
   "torch_dtype": "float32",
-  "transformers_version": "4.40.1"
+  "transformers_version": "4.40.1",
+  "training_config": {
+    "batch_size": 32,
+    "gradient_accumulation_steps": 4,
+    "max_steps": 15000,
+    "eval_steps": 1000,
+    "bf16": false,
+    "gradient_checkpointing": false,
+    "max_length": 1024,
+    "optim": "adamw_torch"
+  }
 }

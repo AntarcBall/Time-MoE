@@ -353,23 +353,40 @@ def main():
 
     if args.config == 'full':
         print("Using FULL config (RTX 3090 mode - 2.4B Corrected)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/config.json', 2, 64, True, True, 2048, "adamw_bnb_8bit"
+        CONFIG_PATH = 'model_config/config.json'
     elif args.config == 'base':
         print("Using BASE config (Time-MoE 50M - Optimized for 3090 SAFETY)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/base_50m.json', 8, 16, True, False, 2048, "adamw_torch"
+        CONFIG_PATH = 'model_config/base_50m.json'
     else:
         print("Using TINY config (Fast-Track Debug Mode)")
-        # Fast-Track: 15000 steps (15x increase), evaluate every 1500 steps
-        # Optimization: Maximize throughput
-        # Batch Size 32 (Physical) * 4 (Accum) = 128 (Effective) -> Faster I/O than 16*8
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/tiny_config.json', 32, 4, False, False, 1024, "adamw_torch"
-        args.steps = 15000     # Increased 15x
-        args.eval_steps = 1000 # Reasonable interval
-        
+        CONFIG_PATH = 'model_config/tiny_config.json'
+
+    # Load configuration
+    config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
+    config.output_hidden_states = True
+    
+    # Extract training parameters from config JSON if available, else fallback to defaults
+    train_conf = getattr(config, 'training_config', {})
+    
+    BATCH_SIZE = train_conf.get('batch_size', 4)
+    GRAD_ACCUM = train_conf.get('gradient_accumulation_steps', 8)
+    MAX_STEPS = train_conf.get('max_steps', args.steps)
+    EVAL_STEPS = train_conf.get('eval_steps', args.eval_steps)
+    BF16 = train_conf.get('bf16', False)
+    GRAD_CHK = train_conf.get('gradient_checkpointing', False)
+    MAX_LENGTH = train_conf.get('max_length', 2048)
+    OPTIM = train_conf.get('optim', "adamw_torch")
+    
+    # Override steps from CLI if provided and different from default
+    if args.steps != 100000: # If user manually set steps
+        MAX_STEPS = args.steps
+    if args.eval_steps != 1000:
+        EVAL_STEPS = args.eval_steps
+
+    print(f"Configuration Loaded: Batch={BATCH_SIZE}, Accum={GRAD_ACCUM}, Steps={MAX_STEPS}, BF16={BF16}")
+
     OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints_tiny_fast' if args.config == 'tiny' else 'checkpoints', 'processed_bin/train', 'processed_bin/val'
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
-    config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
-    config.output_hidden_states = True 
     model = TimeMoeForPrediction(config)
     
     train_ds = runner.get_train_dataset(TRAIN_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=True)
@@ -396,9 +413,9 @@ def main():
 
     from time_moe.trainer.hf_trainer import TimeMoETrainingArguments, TimeMoeTrainer
     training_args = TimeMoETrainingArguments(
-        output_dir=OUTPUT_DIR, max_steps=args.steps, per_device_train_batch_size=BATCH_SIZE,
+        output_dir=OUTPUT_DIR, max_steps=MAX_STEPS, per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
-        max_grad_norm=1.0, save_steps=args.eval_steps, 
+        max_grad_norm=1.0, save_steps=EVAL_STEPS, 
         bf16=BF16, gradient_checkpointing=GRAD_CHK, 
         dataloader_num_workers=0, # WSL optimization: avoid multiprocessing overhead
         dataloader_pin_memory=False, # WSL optimization: reduce memory pinning overhead
@@ -409,11 +426,11 @@ def main():
     trainer = TimeMoeT = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
     
     agent_cb = AgentCallback(trainer, test_ds, BATCH_SIZE)
-    agent_cb.eval_interval_steps = args.eval_steps
+    agent_cb.eval_interval_steps = EVAL_STEPS
     trainer.add_callback(agent_cb)
     
     # Scale warmup steps proportionally (10% of total steps)
-    warmup_steps = int(args.steps * 0.1)
+    warmup_steps = int(MAX_STEPS * 0.1)
     trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
     
     print("Starting Training with Agent...")
