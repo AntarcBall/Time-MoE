@@ -466,8 +466,8 @@ def main():
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
         max_grad_norm=1.0, save_steps=EVAL_STEPS, 
         bf16=BF16, gradient_checkpointing=GRAD_CHK, 
-        dataloader_num_workers=4, # WSL optimization: avoid multiprocessing overhead
-        dataloader_pin_memory=True, # WSL optimization: reduce memory pinning overhead
+        dataloader_num_workers=0, # Revert to 0 for WSL stability
+        dataloader_pin_memory=False, # Revert to False for WSL stability
         dataloader_prefetch_factor=None, # Disabled when num_workers=0
         remove_unused_columns=False
     )
