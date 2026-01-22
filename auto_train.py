@@ -207,6 +207,11 @@ class AgentCallback(TrainerCallback):
         f1_l2, _ = search_best_f1(scores_latent, labels)
         f1_total, _ = search_best_f1(scores_mse + 0.1 * scores_latent, labels)
         
+        # DEBUG: Check Label Distribution
+        num_normals = np.sum(labels == 0)
+        num_anomalies = np.sum(labels == 1)
+        ratio = num_anomalies / (len(labels) + 1e-10)
+        
         curr_loss = 0.0
         for entry in reversed(self.trainer.state.log_history):
             if 'loss' in entry:
@@ -216,6 +221,7 @@ class AgentCallback(TrainerCallback):
         step = self.trainer.state.global_step
         print(f"\n| Step | Loss | Gating | F1-L1 (MSE) | F1-L2 (Latent) | F1-Total |")
         print(f"| {step:4d} | {curr_loss:.4f} | {gating_balance.item() if torch.is_tensor(gating_balance) else gating_balance:.4f} | {f1_l1:.4f} | {f1_l2:.4f} | {f1_total:.4f} |")
+        print(f"[Debug] Eval Labels: Normal={num_normals}, Anomaly={num_anomalies} (Anomaly Ratio: {ratio:.1%})")
         
         # 3. Save Detailed Results
         try:
@@ -305,8 +311,11 @@ def main():
         output_dir=OUTPUT_DIR, max_steps=args.steps, per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
         max_grad_norm=1.0, save_steps=args.eval_steps, 
-        bf16=BF16, gradient_checkpointing=GRAD_CHK, dataloader_num_workers=8, dataloader_pin_memory=True,
-        dataloader_prefetch_factor=2, remove_unused_columns=False
+        bf16=BF16, gradient_checkpointing=GRAD_CHK, 
+        dataloader_num_workers=0, # WSL optimization: avoid multiprocessing overhead
+        dataloader_pin_memory=False, # WSL optimization: reduce memory pinning overhead
+        dataloader_prefetch_factor=None, # Disabled when num_workers=0
+        remove_unused_columns=False
     )
     
     trainer = TimeMoeT = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
