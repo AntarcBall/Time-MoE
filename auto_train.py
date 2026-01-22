@@ -5,6 +5,8 @@ import numpy as np
 import json
 import time
 import argparse
+import matplotlib.pyplot as plt
+import seaborn as sns
 from torch.utils.data import DataLoader
 from transformers import TrainerCallback, TrainingArguments
 from sklearn.metrics import f1_score, precision_recall_curve
@@ -38,7 +40,11 @@ def compute_normal_stats(model, dataloader, num_batches=20):
     hidden_sums = None
     count = 0
     device = model.device
-    expert_counts = torch.zeros(model.config.num_experts, device=device)
+    # [Layer, Expert] matrix
+    num_layers = model.config.num_hidden_layers
+    num_experts = model.config.num_experts
+    
+    expert_counts = torch.zeros((num_layers, num_experts), device=device)
     
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -59,18 +65,27 @@ def compute_normal_stats(model, dataloader, num_batches=20):
             count += curr_count
             
             if hasattr(outputs, 'router_logits') and outputs.router_logits is not None:
-                for layer_logits in outputs.router_logits:
+                for layer_idx, layer_logits in enumerate(outputs.router_logits):
                     if torch.isnan(layer_logits).any(): continue
+                    # layer_logits: [batch, seq, num_experts]
                     _, selected = torch.topk(layer_logits, model.config.num_experts_per_tok, dim=-1)
-                    expert_counts += torch.bincount(selected.flatten(), minlength=model.config.num_experts)
+                    # selected: [batch, seq, k]
+                    
+                    # Flatten and count
+                    counts = torch.bincount(selected.flatten(), minlength=num_experts)
+                    expert_counts[layer_idx] += counts
 
     if count == 0:
-        return torch.zeros(model.config.hidden_size, device=device), 0.0
+        return torch.zeros(model.config.hidden_size, device=device), 0.0, torch.zeros((num_layers, num_experts), device=device)
         
     mean_vector = hidden_sums / count
-    usage = expert_counts / (expert_counts.sum() + 1e-10)
-    gating_balance = usage.std() / (usage.mean() + 1e-10)
-    return mean_vector, gating_balance
+    
+    # Calculate global balance score for logging (aggregated)
+    total_usage = expert_counts.sum(dim=0)
+    usage_ratio = total_usage / (total_usage.sum() + 1e-10)
+    gating_balance = usage_ratio.std() / (usage_ratio.mean() + 1e-10)
+    
+    return mean_vector, gating_balance, expert_counts
 
 def compute_detailed_scores(model, dataloader, mean_vector, dataset, batch_size, limit=None):
     device = model.device
@@ -152,38 +167,6 @@ def init_router_weights(model):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
             if module.bias is not None:
                 torch.nn.init.constant_(module.bias, 0.0)
-class AuxLossWarmupCallback(TrainerCallback):
-    def __init__(self, target=0.01, warmup_ratio=0.10):
-        self.target = target
-        self.warmup_ratio = warmup_ratio
-        self.warmup_steps = 100 
-
-    def on_train_begin(self, args, state, control, **kwargs):
-        if state.max_steps > 0:
-            self.warmup_steps = max(1, int(state.max_steps * self.warmup_ratio))
-        print(f"[Agent] Aux Loss Warmup: Target={self.target}, Steps={self.warmup_steps}")
-
-    def on_step_begin(self, args, state, control, **kwargs):
-        model = kwargs["model"]
-        step = state.global_step
-
-        if step < self.warmup_steps:
-            factor = self.target * (step / self.warmup_steps)
-        else:
-            factor = self.target
-
-        if hasattr(model.config, "router_aux_loss_factor"):
-            model.config.router_aux_loss_factor = factor
-        if hasattr(model, "router_aux_loss_factor"):
-            model.router_aux_loss_factor = factor
-
-def init_router_weights(model):
-    print("[Agent] Re-initializing Router weights for stability...")
-    for name, module in model.named_modules():
-        if "gate" in name and isinstance(module, torch.nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
-            if module.bias is not None:
-                torch.nn.init.constant_(module.bias, 0.0)
 
 class AgentCallback(TrainerCallback):
     def __init__(self, trainer, test_ds, batch_size):
@@ -210,11 +193,12 @@ class AgentCallback(TrainerCallback):
         model = self.trainer.model
         model.eval()
         
+        # 1. Compute Normal Stats (Train Set)
         train_loader = DataLoader(self.trainer.train_dataset, batch_size=self.batch_size, shuffle=True, collate_fn=self.trainer.data_collator)
-        mean_vector, gating_balance = compute_normal_stats(model, train_loader)
+        mean_vector, gating_balance, expert_counts = compute_normal_stats(model, train_loader)
         
+        # 2. Compute Anomaly Scores (Test Set)
         test_loader = DataLoader(self.test_ds, batch_size=self.batch_size, shuffle=False, collate_fn=self.trainer.data_collator)
-        # Check first 50 batches (approx 400 samples) to ensure we hit anomalies
         scores_mse, scores_latent, labels = compute_detailed_scores(model, test_loader, mean_vector, self.test_ds, self.batch_size, limit=50)
         
         f1_l1, _ = search_best_f1(scores_mse, labels)
@@ -227,29 +211,70 @@ class AgentCallback(TrainerCallback):
                 curr_loss = entry['loss']
                 break
 
+        step = self.trainer.state.global_step
         print(f"\n| Step | Loss | Gating | F1-L1 (MSE) | F1-L2 (Latent) | F1-Total |")
-        print(f"| {self.trainer.state.global_step:4d} | {curr_loss:.4f} | {gating_balance.item() if torch.is_tensor(gating_balance) else gating_balance:.4f} | {f1_l1:.4f} | {f1_l2:.4f} | {f1_total:.4f} |")
+        print(f"| {step:4d} | {curr_loss:.4f} | {gating_balance.item() if torch.is_tensor(gating_balance) else gating_balance:.4f} | {f1_l1:.4f} | {f1_l2:.4f} | {f1_total:.4f} |")
         
+        # 3. Save Detailed Results
+        try:
+            # Create directory: checkpoints/step-XXX/eval_results
+            ckpt_path = os.path.join(self.trainer.args.output_dir, f"checkpoint-step-{step}")
+            eval_dir = os.path.join(ckpt_path, "eval_results")
+            os.makedirs(eval_dir, exist_ok=True)
+            
+            # Save Metrics
+            metrics = {
+                "step": step,
+                "loss": float(curr_loss),
+                "gating_balance": float(gating_balance),
+                "f1_l1": float(f1_l1),
+                "f1_l2": float(f1_l2),
+                "f1_total": float(f1_total)
+            }
+            with open(os.path.join(eval_dir, "metrics.json"), "w") as f:
+                json.dump(metrics, f, indent=4)
+                
+            # Plot Expert Heatmap
+            # expert_counts: [Layers, Experts]
+            counts_np = expert_counts.cpu().numpy()
+            # Normalize per layer for better visualization
+            row_sums = counts_np.sum(axis=1, keepdims=True) + 1e-10
+            norm_counts = counts_np / row_sums
+            
+            plt.figure(figsize=(10, 6))
+            sns.heatmap(norm_counts, annot=True, fmt=".2f", cmap="Blues", 
+                        xticklabels=[f"E{i}" for i in range(norm_counts.shape[1])],
+                        yticklabels=[f"L{i}" for i in range(norm_counts.shape[0])])
+            plt.title(f"Expert Routing Heatmap (Step {step})")
+            plt.xlabel("Experts")
+            plt.ylabel("Layers")
+            plt.tight_layout()
+            plt.savefig(os.path.join(eval_dir, "expert_heatmap.png"))
+            plt.close()
+            
+        except Exception as e:
+            print(f"[Agent] Warning: Failed to save eval results/heatmap: {e}")
+
         if f1_total < 0.950:
             model.time_moe_loss_function.delta *= 0.98
         model.train()
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='full', choices=['full', 'base', 'tiny'])
+    parser.add_argument('--config', type=str, default='tiny', choices=['full', 'base', 'tiny'])
     parser.add_argument('--steps', type=int, default=100000)
     parser.add_argument('--eval_steps', type=int, default=1000)
     args = parser.parse_args()
 
     if args.config == 'full':
         print("Using FULL config (RTX 3090 mode - 2.4B Corrected)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/config.json', 2, 64, True, True, 2048, "adamw_bnb_8bit"
+        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/config.json', 2, 64, True, True, 2048, "adamw_bnb_8bit"
     elif args.config == 'base':
         print("Using BASE config (Time-MoE 50M - Optimized for 3090 SAFETY)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/base_50m.json', 8, 16, True, False, 2048, "adamw_torch"
+        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/base_50m.json', 8, 16, True, False, 2048, "adamw_torch"
     else:
         print("Using TINY config (Debug mode)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'Time-MoE/model_config/tiny_config.json', 4, 8, False, False, 1024, "adamw_torch"
+        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/tiny_config.json', 4, 8, False, False, 1024, "adamw_torch"
 
     OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints', 'processed_bin/train', 'processed_bin/val'
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
@@ -272,7 +297,7 @@ def main():
     training_args = TimeMoETrainingArguments(
         output_dir=OUTPUT_DIR, max_steps=args.steps, per_device_train_batch_size=BATCH_SIZE,
         gradient_accumulation_steps=GRAD_ACCUM, learning_rate=1e-4, min_learning_rate=1e-5,
-        warmup_steps=100, max_grad_normsteps=1, save_steps=args.eval_steps, 
+        max_grad_norm=1.0, save_steps=args.eval_steps, 
         bf16=BF16, gradient_checkpointing=GRAD_CHK, dataloader_num_workers=8, dataloader_pin_memory=True,
         dataloader_prefetch_factor=2, remove_unused_columns=False
     )
