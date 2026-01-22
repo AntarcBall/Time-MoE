@@ -1,69 +1,20 @@
-import sys
 import os
+import sys
+import time
+import json
 import torch
 import numpy as np
-import json
-import time
-import random
-import argparse
 import matplotlib.pyplot as plt
 import seaborn as sns
 from torch.utils.data import DataLoader
-from transformers import TrainerCallback, TrainingArguments, AutoModelForCausalLM, AutoConfig
+from transformers import TrainerCallback
 from sklearn.metrics import f1_score, precision_recall_curve
 
 # Add Time-MoE to path
 sys.path.append(os.path.join(os.getcwd(), 'Time-MoE'))
 
-from time_moe.runner import TimeMoeRunner
-from time_moe.models.modeling_time_moe import TimeMoeForPrediction, TimeMoeConfig
-from time_moe.utils.log_util import log_in_local_rank_0
-from time_moe.datasets.time_moe_dataset import TimeMoEDataset, binary_search
-from time_moe.trainer.hf_trainer import TimeMoETrainingArguments, TimeMoeTrainer
+from time_moe.datasets.time_moe_dataset import binary_search
 
-class DirectTimeMoEDataset:
-    """
-    Optimization: Direct wrapper for pre-segmented binary datasets.
-    Bypasses the heavy TimeMoEWindowDataset logic since data is already chopped to correct size.
-    """
-    def __init__(self, base_dataset, max_length, shuffle=False):
-        self.dataset = base_dataset
-        self.max_length = max_length
-        self.indices = list(range(len(base_dataset)))
-        if shuffle:
-            random.shuffle(self.indices)
-            
-        # Mocking sub_seq_indexes for compatibility with compute_detailed_scores
-        # format: (seq_idx, offset)
-        self.sub_seq_indexes = [(i, 0) for i in self.indices]
-
-    def __len__(self):
-        return len(self.dataset)
-    
-    def __getitem__(self, idx):
-        real_idx = self.indices[idx]
-        seq = self.dataset[real_idx]
-        if not isinstance(seq, np.ndarray):
-            seq = np.array(seq, dtype=np.float32)
-            
-        target_len = self.max_length + 1
-        loss_mask = np.ones(len(seq) - 1, dtype=np.int32)
-        
-        if len(seq) < target_len:
-            n_pad = target_len - len(seq)
-            seq = np.pad(seq, (0, n_pad), 'constant', constant_values=0)
-            loss_mask = np.pad(loss_mask, (0, n_pad), 'constant', constant_values=0)
-        elif len(seq) > target_len:
-            seq = seq[:target_len]
-            loss_mask = loss_mask[:target_len-1]
-            
-        return {
-            'input_ids': seq[:-1],
-            'labels': seq[1:],
-            'loss_masks': loss_mask
-        }
-
-# Global Helpers
 def search_best_f1(scores, labels):
     valid_mask = ~np.isnan(scores)
     if not np.any(valid_mask):
@@ -194,14 +145,6 @@ class AuxLossWarmupCallback(TrainerCallback):
         if hasattr(model, "router_aux_loss_factor"):
             model.router_aux_loss_factor = factor
 
-def init_router_weights(model):
-    print("[Agent] Re-initializing Router weights for stability...")
-    for name, module in model.named_modules():
-        if "gate" in name and isinstance(module, torch.nn.Linear):
-            torch.nn.init.normal_(module.weight, mean=0.0, std=0.01)
-            if module.bias is not None:
-                torch.nn.init.constant_(module.bias, 0.0)
-
 class AgentCallback(TrainerCallback):
     def __init__(self, trainer, test_ds, batch_size):
         self.trainer = trainer
@@ -287,165 +230,3 @@ class AgentCallback(TrainerCallback):
         if f1_total < 0.950:
             model.time_moe_loss_function.delta *= 0.98
         model.train()
-
-# ---------------------------------------------------------
-# Core Modules
-# ---------------------------------------------------------
-def load_config(args):
-    if args.config == 'full':
-        print("Using FULL config (RTX 3090 mode - 2.4B Corrected)")
-        model_id = "Maple728/TimeMoE-2.4B"
-        config_path = 'model_config/config.json'
-    elif args.config == 'base':
-        print("Using BASE config (Pre-trained TimeMoE-50M)")
-        model_id = "Maple728/TimeMoE-50M"
-        config_path = 'model_config/base_50m.json'
-    else:
-        print("Using TINY config (Fast-Track Debug Mode with 50M weights)")
-        model_id = "Maple728/TimeMoE-50M"
-        config_path = 'model_config/tiny_config.json'
-        
-    local_config = TimeMoeConfig.from_pretrained(config_path)
-    train_conf = getattr(local_config, 'training_config', {})
-    
-    # Merge JSON config with CLI overrides
-    config = {
-        'model_id': model_id,
-        'local_config': local_config,
-        'config_path': config_path,
-        'batch_size': train_conf.get('batch_size', 4),
-        'gradient_accumulation_steps': train_conf.get('gradient_accumulation_steps', 8),
-        'max_steps': args.steps if args.steps != 100000 else train_conf.get('max_steps', args.steps),
-        'eval_steps': args.eval_steps if args.eval_steps != 1000 else train_conf.get('eval_steps', args.eval_steps),
-        'bf16': train_conf.get('bf16', False),
-        'fp16': train_conf.get('fp16', False),
-        'gradient_checkpointing': train_conf.get('gradient_checkpointing', False),
-        'max_length': train_conf.get('max_length', 2048),
-        'optim': train_conf.get('optim', "adamw_torch"),
-        'output_dir': 'checkpoints_transfer' if args.config == 'tiny' else 'checkpoints_transfer_base',
-        'train_data': 'processed_bin/train',
-        'test_data': 'processed_bin/val'
-    }
-    
-    print(f"Configuration Loaded: Batch={config['batch_size']}, Accum={config['gradient_accumulation_steps']}, "
-          f"Steps={config['max_steps']}, BF16={config['bf16']}, FP16={config['fp16']}")
-    
-    return config
-
-def load_model(config):
-    print(f"[Transfer Learning] Loading pre-trained weights from: {config['model_id']}")
-    try:
-        model = TimeMoeForPrediction.from_pretrained(
-            config['model_id'],
-            torch_dtype=torch.float16 if config['fp16'] else (torch.bfloat16 if config['bf16'] else torch.float32),
-            device_map="auto"
-        )
-        model.config.use_cache = False
-        model.config.output_hidden_states = True
-        
-        if model.config.input_size != 1:
-            print(f"Warning: Pre-trained model input_size is {model.config.input_size}, but dataset is univariate (1).")
-            
-    except Exception as e:
-        print(f"Error loading pre-trained model {config['model_id']}: {e}")
-        print("Fallback to training from scratch with local config...")
-        model_config = config['local_config']
-        model_config.output_hidden_states = True
-        model = TimeMoeForPrediction(model_config)
-        
-    return model
-
-def freeze_parameters(model):
-    print("[Agent] Applying Partial Freezing Strategy...")
-    frozen_params = []
-    unfrozen_params = []
-    
-    for name, param in model.named_parameters():
-        param.requires_grad = True # Default
-        
-        # Freeze experts AND Attention (MLP layers inside MoE + Self-Attention)
-        if ("experts." in name and "shared_expert" not in name) or ("self_attn." in name):
-             param.requires_grad = False
-             frozen_params.append(name)
-        else:
-             unfrozen_params.append(name)
-             
-    print(f"[Agent] Frozen {len(frozen_params)} parameters (Sparse Experts + Attention).")
-    print(f"[Agent] Unfrozen {len(unfrozen_params)} parameters (Router, Shared, Head, Embed).")
-
-def prepare_datasets(runner, config):
-    train_ds = runner.get_train_dataset(config['train_data'], config['max_length'], config['max_length'], "zero", random_offset=True)
-    
-    if "processed_bin" in config['train_data']:
-        log_in_local_rank_0('Optimization: Using DirectTimeMoEDataset for TRAIN...')
-        train_ds = DirectTimeMoEDataset(train_ds.dataset, config['max_length'], shuffle=True)
-
-    log_in_local_rank_0('Loading TEST dataset...')
-    test_raw_ds = TimeMoEDataset(config['test_data'], normalization_method="zero")
-    
-    log_in_local_rank_0('Optimization: Using DirectTimeMoEDataset for TEST...')
-    test_ds = DirectTimeMoEDataset(test_raw_ds, config['max_length'], shuffle=True)
-    
-    return train_ds, test_ds
-
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', type=str, default='tiny', choices=['full', 'base', 'tiny'])
-    parser.add_argument('--steps', type=int, default=100000)
-    parser.add_argument('--eval_steps', type=int, default=1000)
-    args = parser.parse_args()
-
-    # 1. Load Config
-    config = load_config(args)
-    runner = TimeMoeRunner(output_path=config['output_dir'], seed=42)
-
-    # 2. Load Model
-    model = load_model(config)
-    
-    # 3. Initialize Router & Apply Freezing
-    init_router_weights(model)
-    freeze_parameters(model)
-
-    try:
-        import bitsandbytes
-    except ImportError:
-        if config['optim'] == "adamw_bnb_8bit": 
-            config['optim'] = "adamw_torch"
-
-    # 4. Prepare Datasets
-    train_ds, test_ds = prepare_datasets(runner, config)
-
-    # 5. Setup Trainer
-    training_args = TimeMoETrainingArguments(
-        output_dir=config['output_dir'], 
-        max_steps=config['max_steps'], 
-        per_device_train_batch_size=config['batch_size'],
-        gradient_accumulation_steps=config['gradient_accumulation_steps'], 
-        learning_rate=1e-4, 
-        min_learning_rate=1e-5,
-        max_grad_norm=1.0, 
-        save_steps=config['eval_steps'], 
-        bf16=config['bf16'], 
-        fp16=config['fp16'],
-        gradient_checkpointing=config['gradient_checkpointing'], 
-        dataloader_num_workers=0, 
-        dataloader_pin_memory=False, 
-        dataloader_prefetch_factor=None, 
-        remove_unused_columns=False
-    )
-    
-    trainer = TimeMoeTrainer(model=model, args=training_args, train_dataset=train_ds)
-    
-    agent_cb = AgentCallback(trainer, test_ds, config['batch_size'])
-    agent_cb.eval_interval_steps = config['eval_steps']
-    trainer.add_callback(agent_cb)
-    
-    warmup_steps = int(config['max_steps'] * 0.1)
-    trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
-    
-    print("Starting Training with Agent...")
-    trainer.train()
-    trainer.save_model() # Final save
-
-if __name__ == "__main__":
-    main()
