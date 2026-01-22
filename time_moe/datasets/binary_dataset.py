@@ -38,9 +38,21 @@ class BinaryDataset(TimeSeriesDataset):
             )
             s_idx += length
         self.num_tokens = s_idx
+        
+        # File handle cache for persistent workers
+        self._file_handles = {}
 
     def __len__(self):
         return self.num_sequences
+
+    def __del__(self):
+        # Close all file handles on destruction
+        if hasattr(self, '_file_handles'):
+            for f in self._file_handles.values():
+                try:
+                    f.close()
+                except:
+                    pass
 
     def __getitem__(self, seq_idx):
         seq_info = self.seq_infos[seq_idx]
@@ -83,9 +95,23 @@ class BinaryDataset(TimeSeriesDataset):
 
     def _read_sequence_in_file(self, fn, offset_in_file, length):
         sentence = np.empty(length, dtype=self.dtype)
-        with open(fn, mode='rb', buffering=0) as file_handler:
-            file_handler.seek(offset_in_file * sentence.itemsize)
-            file_handler.readinto(sentence)
+        
+        # Cache file handles to avoid repeated open() syscalls
+        if fn not in self._file_handles:
+            try:
+                self._file_handles[fn] = open(fn, mode='rb', buffering=0)
+            except OSError as e:
+                # If too many open files, clear cache and retry one by one (LRU naive)
+                if e.errno == 24: # EMFILE
+                    for fh in self._file_handles.values(): fh.close()
+                    self._file_handles.clear()
+                    self._file_handles[fn] = open(fn, mode='rb', buffering=0)
+                else:
+                    raise e
+                    
+        file_handler = self._file_handles[fn]
+        file_handler.seek(offset_in_file * sentence.itemsize)
+        file_handler.readinto(sentence)
         return sentence
 
     @staticmethod
