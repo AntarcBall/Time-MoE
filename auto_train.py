@@ -67,15 +67,30 @@ def compute_normal_stats(model, dataloader, num_batches=20):
             count += curr_count
             
             if hasattr(outputs, 'router_logits') and outputs.router_logits is not None:
+                # router_logits is a tuple of tensors (one per layer)
                 for layer_idx, layer_logits in enumerate(outputs.router_logits):
                     if torch.isnan(layer_logits).any(): continue
                     # layer_logits: [batch, seq, num_experts]
-                    _, selected = torch.topk(layer_logits, model.config.num_experts_per_tok, dim=-1)
-                    # selected: [batch, seq, k]
                     
-                    # Flatten and count
-                    counts = torch.bincount(selected.flatten(), minlength=num_experts)
-                    expert_counts[layer_idx] += counts
+                    # Top-K selection logic matching the model
+                    # Usually Top-2
+                    k = model.config.num_experts_per_tok
+                    
+                    # Apply softmax to get probabilities (optional for counting, but good for debug)
+                    # probs = torch.softmax(layer_logits, dim=-1)
+                    
+                    # Get indices
+                    _, selected_indices = torch.topk(layer_logits, k, dim=-1)
+                    # selected_indices: [batch, seq, k]
+                    
+                    # Flatten to [batch * seq * k]
+                    flat_indices = selected_indices.flatten()
+                    
+                    # Count occurrences of each expert (0 to num_experts-1)
+                    counts = torch.bincount(flat_indices, minlength=num_experts)
+                    
+                    # Accumulate
+                    expert_counts[layer_idx] += counts.float()
 
     if count == 0:
         return torch.zeros(model.config.hidden_size, device=device), 0.0, torch.zeros((num_layers, num_experts), device=device)
@@ -83,9 +98,22 @@ def compute_normal_stats(model, dataloader, num_batches=20):
     mean_vector = hidden_sums / count
     
     # Calculate global balance score for logging (aggregated)
-    total_usage = expert_counts.sum(dim=0)
-    usage_ratio = total_usage / (total_usage.sum() + 1e-10)
-    gating_balance = usage_ratio.std() / (usage_ratio.mean() + 1e-10)
+    # expert_counts: [Layer, Expert]
+    total_usage = expert_counts.sum(dim=0)  # [Experts]
+    
+    # Avoid division by zero
+    total_sum = total_usage.sum()
+    if total_sum > 0:
+        usage_ratio = total_usage / total_sum
+        # Coefficient of Variation: std / mean
+        # If mean is 0, it's 0. If perfectly balanced, std is 0 -> balance is 0.
+        # Wait, usually high balance score means BAD balance (high variance).
+        # Let's use Normalized Entropy instead? Or stick to CV but fix logging.
+        # Ideally, we want CV close to 0 (Perfect Balance).
+        # But if it's returning 0.00 and heatmap is 0.00, it means counts are ZERO.
+        gating_balance = usage_ratio.std() / (usage_ratio.mean() + 1e-6)
+    else:
+        gating_balance = 0.0
     
     return mean_vector, gating_balance, expert_counts
 
@@ -281,10 +309,15 @@ def main():
         print("Using BASE config (Time-MoE 50M - Optimized for 3090 SAFETY)")
         CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/base_50m.json', 8, 16, True, False, 2048, "adamw_torch"
     else:
-        print("Using TINY config (Debug mode)")
-        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/tiny_config.json', 4, 8, False, False, 1024, "adamw_torch"
-
-    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints', 'processed_bin/train', 'processed_bin/val'
+        print("Using TINY config (Fast-Track Debug Mode)")
+        # Fast-Track: 15000 steps (15x increase), evaluate every 1500 steps
+        # Optimization: Maximize throughput
+        # Batch Size 32 (Physical) * 4 (Accum) = 128 (Effective) -> Faster I/O than 16*8
+        CONFIG_PATH, BATCH_SIZE, GRAD_ACCUM, BF16, GRAD_CHK, MAX_LENGTH, OPTIM = 'model_config/tiny_config.json', 32, 4, False, False, 1024, "adamw_torch"
+        args.steps = 15000     # Increased 15x
+        args.eval_steps = 1000 # Reasonable interval
+        
+    OUTPUT_DIR, TRAIN_DATA, TEST_DATA = 'checkpoints_tiny_fast' if args.config == 'tiny' else 'checkpoints', 'processed_bin/train', 'processed_bin/val'
     runner = TimeMoeRunner(output_path=OUTPUT_DIR, seed=42)
     config = TimeMoeConfig.from_pretrained(CONFIG_PATH)
     config.output_hidden_states = True 
@@ -323,6 +356,9 @@ def main():
     agent_cb = AgentCallback(trainer, test_ds, BATCH_SIZE)
     agent_cb.eval_interval_steps = args.eval_steps
     trainer.add_callback(agent_cb)
+    
+    # Scale warmup steps proportionally (10% of total steps)
+    warmup_steps = int(args.steps * 0.1)
     trainer.add_callback(AuxLossWarmupCallback(target=0.1, warmup_ratio=0.1))
     
     print("Starting Training with Agent...")
