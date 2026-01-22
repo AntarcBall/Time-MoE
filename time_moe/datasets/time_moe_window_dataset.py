@@ -37,7 +37,7 @@ class TimeMoEWindowDataset:
         >>>     print(sample['input_ids'], sample['labels'], sample['loss_masks'])
     """
 
-    def __init__(self, dataset: TimeSeriesDataset, context_length: int, prediction_length: int = 0, stride: int = None, random_offset: bool = False, **kwrags):
+    def __init__(self, dataset: TimeSeriesDataset, context_length: int, prediction_length: int = 0, stride: int = None, shuffle: bool = False, random_offset: bool = False, **kwrags):
         self.dataset = dataset
         self.context_length = context_length
         self.prediction_length = prediction_length
@@ -47,7 +47,12 @@ class TimeMoEWindowDataset:
         self.random_offset = random_offset
 
         num_seqs = len(self.dataset)
-        iterator = range(num_seqs)
+        iterator = list(range(num_seqs))
+        
+        # Shuffle sequence order if requested (important for mixing classes in sequential eval)
+        if shuffle:
+            random.shuffle(iterator)
+
         try:
             from tqdm import tqdm
             iterator = tqdm(iterator, total=num_seqs)

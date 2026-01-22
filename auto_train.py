@@ -16,7 +16,9 @@ sys.path.append(os.path.join(os.getcwd(), 'Time-MoE'))
 
 from time_moe.runner import TimeMoeRunner
 from time_moe.models.modeling_time_moe import TimeMoeForPrediction, TimeMoeConfig
-from time_moe.datasets.time_moe_dataset import binary_search
+from time_moe.utils.log_util import log_in_local_rank_0
+from time_moe.datasets.time_moe_dataset import TimeMoEDataset, binary_search
+from time_moe.datasets.time_moe_window_dataset import TimeMoEWindowDataset
 
 # Global Helpers
 def search_best_f1(scores, labels):
@@ -283,7 +285,12 @@ def main():
     model = TimeMoeForPrediction(config)
     
     train_ds = runner.get_train_dataset(TRAIN_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=True)
-    test_ds = runner.get_train_dataset(TEST_DATA, MAX_LENGTH, MAX_LENGTH, "zero", random_offset=False) 
+    # CRITICAL FIX: Ensure test dataset is shuffled to mix Normal/Anomaly in the first few batches
+    log_in_local_rank_0('Loading TEST dataset...')
+    test_raw_ds = TimeMoEDataset(TEST_DATA, normalization_method="zero")
+    log_in_local_rank_0('Processing TEST dataset with shuffle=True...')
+    # Using shuffle=True here ensures the sub_seq_indexes are randomized
+    test_ds = TimeMoEWindowDataset(test_raw_ds, context_length=MAX_LENGTH, prediction_length=0, stride=MAX_LENGTH, shuffle=True, random_offset=True)
     
     # 2. Re-init router for stability
     init_router_weights(model)
